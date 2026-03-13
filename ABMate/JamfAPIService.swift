@@ -233,27 +233,55 @@ class JamfAPIService {
 
     /// Update purchasing info for a mobile device
     func updateMobileDevicePurchasing(id: String, purchasing: JamfPurchasing, token: String) async throws {
-        guard let url = URL(string: "\(baseURL)/api/v2/mobile-devices/\(id)") else {
+        // The Jamf Pro v2 mobile device endpoint does NOT support purchasing fields.
+        // We must use the Classic API (XML) to update mobile device purchasing data.
+        guard let url = URL(string: "\(baseURL)/JSSResource/mobiledevices/id/\(id)") else {
             throw JamfAPIError.invalidURL
         }
 
         var request = URLRequest(url: url)
-        request.httpMethod = "PATCH"
+        request.httpMethod = "PUT"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/xml", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/xml", forHTTPHeaderField: "Accept")
 
-        let updatePayload = JamfMobileDeviceUpdate(purchasing: purchasing)
-        request.httpBody = try JSONEncoder().encode(updatePayload)
+        // Build XML payload for Classic API
+        var xml = "<mobile_device><purchasing>"
+        xml += "<is_purchased>\((purchasing.purchased ?? false) ? "true" : "false")</is_purchased>"
+        xml += "<is_leased>\((purchasing.leased ?? false) ? "true" : "false")</is_leased>"
+        if let po = purchasing.poNumber { xml += "<po_number>\(escapeXML(po))</po_number>" }
+        if let vendor = purchasing.vendor { xml += "<vendor>\(escapeXML(vendor))</vendor>" }
+        if let poDate = purchasing.poDate { xml += "<po_date>\(escapeXML(poDate))</po_date>" }
+        if let warrantyDate = purchasing.warrantyDate { xml += "<warranty_expires>\(escapeXML(warrantyDate))</warranty_expires>" }
+        if let appleCareId = purchasing.appleCareId { xml += "<applecare_id>\(escapeXML(appleCareId))</applecare_id>" }
+        if let leaseDate = purchasing.leaseDate { xml += "<lease_expires>\(escapeXML(leaseDate))</lease_expires>" }
+        if let price = purchasing.purchasePrice { xml += "<purchase_price>\(escapeXML(price))</purchase_price>" }
+        if let life = purchasing.lifeExpectancy { xml += "<life_expectancy>\(life)</life_expectancy>" }
+        if let account = purchasing.purchasingAccount { xml += "<purchasing_account>\(escapeXML(account))</purchasing_account>" }
+        if let contact = purchasing.purchasingContact { xml += "<purchasing_contact>\(escapeXML(contact))</purchasing_contact>" }
+        xml += "</purchasing></mobile_device>"
+
+        request.httpBody = xml.data(using: .utf8)
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
         if let httpResponse = response as? HTTPURLResponse {
             print("Jamf Mobile Update (\(id)): HTTP \(httpResponse.statusCode)")
-            if httpResponse.statusCode != 200 && httpResponse.statusCode != 204 {
+            if httpResponse.statusCode != 200 && httpResponse.statusCode != 201 {
                 let body = String(data: data, encoding: .utf8) ?? ""
                 throw JamfAPIError.apiError(httpResponse.statusCode, body)
             }
         }
+    }
+
+    /// Escape special characters for XML values
+    private func escapeXML(_ string: String) -> String {
+        string
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
     }
 
     // MARK: - Unified Device Lookup
@@ -299,5 +327,114 @@ class JamfAPIService {
         case .mobileDevice:
             try await updateMobileDevicePurchasing(id: match.id, purchasing: purchasing, token: token)
         }
+    }
+
+    // MARK: - Bulk Fetch (Paginated)
+
+    /// Fetch ALL computers from Jamf Pro (paginated). Returns a dict of serial → JamfBulkDevice.
+    func fetchAllComputers(token: String, onProgress: @Sendable (Int, Int) -> Void = { _, _ in }) async throws -> [String: JamfBulkDevice] {
+        var result: [String: JamfBulkDevice] = [:]
+        var page = 0
+        let pageSize = 100
+        var totalCount = 0
+
+        repeat {
+            let urlString = "\(baseURL)/api/v1/computers-inventory?section=HARDWARE&section=GENERAL&section=PURCHASING&page=\(page)&page-size=\(pageSize)"
+            guard let url = URL(string: urlString) else { throw JamfAPIError.invalidURL }
+
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                let body = String(data: data, encoding: .utf8) ?? ""
+                throw JamfAPIError.apiError(httpResponse.statusCode, body)
+            }
+
+            let searchResponse = try JSONDecoder().decode(JamfComputerSearchResponse.self, from: data)
+            totalCount = searchResponse.totalCount
+
+            for computer in searchResponse.results {
+                if let serial = computer.hardware?.serialNumber, !serial.isEmpty {
+                    result[serial.uppercased()] = JamfBulkDevice(
+                        id: computer.id,
+                        name: computer.general?.name ?? "Unknown",
+                        serial: serial,
+                        model: computer.hardware?.model ?? "Unknown",
+                        deviceType: .computer,
+                        currentPONumber: computer.purchasing?.poNumber,
+                        currentVendor: computer.purchasing?.vendor
+                    )
+                }
+            }
+
+            onProgress(result.count, totalCount)
+            page += 1
+        } while result.count < totalCount && page < 200 // safety cap
+
+        print("Jamf bulk fetch: \(result.count) computers")
+        return result
+    }
+
+    /// Fetch ALL mobile devices from Jamf Pro (paginated). Returns a dict of serial → JamfBulkDevice.
+    func fetchAllMobileDevices(token: String, onProgress: @Sendable (Int, Int) -> Void = { _, _ in }) async throws -> [String: JamfBulkDevice] {
+        var result: [String: JamfBulkDevice] = [:]
+        var page = 0
+        let pageSize = 100
+        var totalCount = 0
+
+        repeat {
+            let urlString = "\(baseURL)/api/v2/mobile-devices?page=\(page)&page-size=\(pageSize)"
+            guard let url = URL(string: urlString) else { throw JamfAPIError.invalidURL }
+
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                let body = String(data: data, encoding: .utf8) ?? ""
+                throw JamfAPIError.apiError(httpResponse.statusCode, body)
+            }
+
+            let searchResponse = try JSONDecoder().decode(JamfMobileDeviceSearchResponse.self, from: data)
+            totalCount = searchResponse.totalCount
+
+            for device in searchResponse.results {
+                if let serial = device.serialNumber, !serial.isEmpty {
+                    result[serial.uppercased()] = JamfBulkDevice(
+                        id: device.id,
+                        name: device.name ?? "Unknown",
+                        serial: serial,
+                        model: device.model ?? "Unknown",
+                        deviceType: .mobileDevice
+                    )
+                }
+            }
+
+            onProgress(result.count, totalCount)
+            page += 1
+        } while result.count < totalCount && page < 200
+
+        print("Jamf bulk fetch: \(result.count) mobile devices")
+        return result
+    }
+
+    /// Fetch ALL Jamf devices (computers + mobile) into a single serial → device dict.
+    func fetchAllDevices(token: String, onProgress: @Sendable (String) -> Void = { _ in }) async throws -> [String: JamfBulkDevice] {
+        onProgress("Fetching computers from Jamf Pro...")
+        var allDevices = try await fetchAllComputers(token: token)
+
+        onProgress("Fetching mobile devices from Jamf Pro...")
+        let mobileDevices = try await fetchAllMobileDevices(token: token)
+
+        // Merge — mobile devices won't collide since serials are unique
+        allDevices.merge(mobileDevices) { existing, _ in existing }
+
+        onProgress("Found \(allDevices.count) total devices in Jamf Pro.")
+        return allDevices
     }
 }

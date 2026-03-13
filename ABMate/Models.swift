@@ -7,6 +7,23 @@
 
 import Foundation
 
+// MARK: - Toast Alert
+struct ToastAlert: Identifiable, Equatable {
+    let id = UUID()
+    let message: String
+    let type: ToastType
+
+    enum ToastType: Equatable {
+        case success
+        case error
+        case info
+    }
+
+    static func == (lhs: ToastAlert, rhs: ToastAlert) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
 // API Credentials
 struct APICredentials: Codable {
     let clientId: String
@@ -395,6 +412,45 @@ struct JamfDeviceMatch {
     let model: String
     let deviceType: JamfDeviceType
     let currentPurchasing: JamfPurchasing?
+}
+
+/// Lightweight device record for bulk comparison (no purchasing detail — just identity)
+struct JamfBulkDevice {
+    let id: String
+    let name: String
+    let serial: String
+    let model: String
+    let deviceType: JamfDeviceType
+    var currentPONumber: String?
+    var currentVendor: String?
+}
+
+/// Entry in the bulk sync log
+struct BulkSyncLogEntry: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let serial: String
+    let message: String
+    let level: LogLevel
+
+    enum LogLevel {
+        case info, success, warning, error
+    }
+}
+
+/// Summary of a bulk sync run
+struct BulkSyncSummary {
+    var jamfComputerCount: Int = 0
+    var jamfMobileCount: Int = 0
+    var asmDeviceCount: Int = 0
+    var matchedCount: Int = 0
+    var notInJamfCount: Int = 0
+    var skippedNoChangeCount: Int = 0
+    var pushSuccessCount: Int = 0
+    var pushFailCount: Int = 0
+    var failedSerials: [String] = []
+    var startTime: Date = Date()
+    var endTime: Date?
 }
 
 /// Represents what we want to sync from ASM to Jamf
