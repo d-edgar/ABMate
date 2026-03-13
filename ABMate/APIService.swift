@@ -11,26 +11,32 @@ import Foundation
 class APIService {
     private var accessToken: String?
     private var tokenExpiry: Date?
-    
+    private var apiBaseURL: String = "https://api-business.apple.com"
+
     // Get access token
     func getAccessToken(clientAssertion: String, clientId: String) async throws -> String {
         // Check if we have valid token
         if let token = accessToken, let expiry = tokenExpiry, expiry > Date() {
             return token
         }
-    
+
         // Create request
         var request = URLRequest(url: URL(string: "https://account.apple.com/auth/oauth2/token")!)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        
+
+        // Detect ASM vs ABM based on client ID prefix
+        let isSchool = clientId.hasPrefix("SCHOOLAPI.")
+        let scope = isSchool ? "school.api" : "business.api"
+        self.apiBaseURL = isSchool ? "https://api-school.apple.com" : "https://api-business.apple.com"
+
         // Create body
         let bodyParams = [
             "grant_type": "client_credentials",
             "client_id": clientId,
             "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
             "client_assertion": clientAssertion,
-            "scope": "business.api"
+            "scope": scope
         ]
         
         let bodyString = bodyParams
@@ -65,7 +71,7 @@ class APIService {
     
     // Check activity status
     func checkActivityStatus(activityId: String, accessToken: String) async throws -> ActivityStatusResponse {
-        let url = URL(string: "https://api-business.apple.com/v1/orgDeviceActivities/\(activityId)")!
+        let url = URL(string: "\(apiBaseURL)/v1/orgDeviceActivities/\(activityId)")!
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         
@@ -76,7 +82,7 @@ class APIService {
     // Fetch devices
     func fetchDevices(accessToken: String) async throws -> [OrgDevice] {
         var allDevices: [OrgDevice] = []
-        var nextURL: String? = "https://api-business.apple.com/v1/orgDevices"
+        var nextURL: String? = "\(apiBaseURL)/v1/orgDevices"
         
         while let urlString = nextURL {
             guard let url = URL(string: urlString) else { break }
@@ -114,7 +120,7 @@ class APIService {
     
     // Get device by ID
     func getDevice(id: String, accessToken: String) async throws -> OrgDevice {
-        let url = URL(string: "https://api-business.apple.com/v1/orgDevices/\(id)")!
+        let url = URL(string: "\(apiBaseURL)/v1/orgDevices/\(id)")!
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         
@@ -125,7 +131,7 @@ class APIService {
     
     // Get AppleCare Coverage for a device
     func getAppleCareCoverage(deviceId: String, accessToken: String) async throws -> AppleCareCoverage {
-        let url = URL(string: "https://api-business.apple.com/v1/orgDevices/\(deviceId)/appleCareCoverage")!
+        let url = URL(string: "\(apiBaseURL)/v1/orgDevices/\(deviceId)/appleCareCoverage")!
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -165,7 +171,7 @@ class APIService {
     
     // Get assigned MDM server for a device
     func getAssignedServer(deviceId: String, accessToken: String) async throws -> String? {
-        let url = URL(string: "https://api-business.apple.com/v1/orgDevices/\(deviceId)/relationships/assignedServer")!
+        let url = URL(string: "\(apiBaseURL)/v1/orgDevices/\(deviceId)/relationships/assignedServer")!
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -184,7 +190,7 @@ class APIService {
     
     // Fetch MDM servers
     func fetchMDMServers(accessToken: String) async throws -> [MDMServer] {
-        let url = URL(string: "https://api-business.apple.com/v1/mdmServers")!
+        let url = URL(string: "\(apiBaseURL)/v1/mdmServers")!
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -204,7 +210,7 @@ class APIService {
     
     // Get devices for MDM server
     func getDevicesForMDM(mdmId: String, accessToken: String) async throws -> [String] {
-        let url = URL(string: "https://api-business.apple.com/v1/mdmServers/\(mdmId)/relationships/devices")!
+        let url = URL(string: "\(apiBaseURL)/v1/mdmServers/\(mdmId)/relationships/devices")!
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         
@@ -215,7 +221,7 @@ class APIService {
     
     // Assign/unassign devices
     func assignDevices(deviceIds: [String], mdmId: String?, accessToken: String) async throws -> String {
-        let url = URL(string: "https://api-business.apple.com/v1/orgDeviceActivities")!
+        let url = URL(string: "\(apiBaseURL)/v1/orgDeviceActivities")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")

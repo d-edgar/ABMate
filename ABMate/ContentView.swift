@@ -184,7 +184,7 @@ struct ConnectionSettingsSheet: View {
                         VStack(spacing: 12) {
                             CredentialField(
                                 label: "Client ID",
-                                placeholder: "BUSINESSAPI.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                                placeholder: "BUSINESSAPI. or SCHOOLAPI.xxxxxxxx-xxxx-...",
                                 text: $viewModel.clientId,
                                 icon: "person.badge.key"
                             )
