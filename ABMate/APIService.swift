@@ -24,13 +24,16 @@ class APIService {
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         
+        // Detect scope based on client ID prefix
+        let scope = clientId.hasPrefix("SCHOOLAPI.") ? "school.api" : "business.api"
+
         // Create body
         let bodyParams = [
             "grant_type": "client_credentials",
             "client_id": clientId,
             "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
             "client_assertion": clientAssertion,
-            "scope": "business.api"
+            "scope": scope
         ]
         
         let bodyString = bodyParams
