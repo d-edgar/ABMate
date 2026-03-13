@@ -9,8 +9,21 @@ if [ ! -f "$FILE" ]; then
     exit 1
 fi
 
+FOUND=0
+
+# Match quoted team IDs: DEVELOPMENT_TEAM = "XXXXXXXXXX";
 if grep -qE 'DEVELOPMENT_TEAM = "[A-Z0-9]{10}";' "$FILE"; then
     sed -i '' -E 's/DEVELOPMENT_TEAM = "[A-Z0-9]{10}";/DEVELOPMENT_TEAM = "";/' "$FILE"
+    FOUND=1
+fi
+
+# Match unquoted team IDs: DEVELOPMENT_TEAM = XXXXXXXXXX;
+if grep -qE 'DEVELOPMENT_TEAM = [A-Z0-9]{10};' "$FILE"; then
+    sed -i '' -E 's/DEVELOPMENT_TEAM = [A-Z0-9]{10};/DEVELOPMENT_TEAM = "";/' "$FILE"
+    FOUND=1
+fi
+
+if [ "$FOUND" -eq 1 ]; then
     echo "Scrubbed DEVELOPMENT_TEAM from $FILE"
 else
     echo "No team IDs found — already clean."
