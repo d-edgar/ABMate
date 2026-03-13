@@ -15,27 +15,36 @@ struct CSVDocument: FileDocument {
     var csvString: String
     
     init(devices: [OrgDevice]) {
-        var csv = "Serial Number,Model,Product Family,Product Type,Status,ID\n"
-        
+        var csv = "Serial Number,Model,Product Family,Product Type,Capacity,Color,Status,Order Number,Added to Org,Last Updated,ID\n"
+
         for device in devices {
-            let row = [
+            let fields: [String] = [
                 device.serialNumber,
                 device.model ?? "",
                 device.os ?? "",
-                device.productType ?? "",
+                device.productType ?? ""
+            ]
+            let fields2: [String] = [
+                device.capacity ?? "",
+                device.color ?? "",
                 device.enrollmentState ?? "",
+                device.orderNumber ?? ""
+            ]
+            let fields3: [String] = [
+                device.addedDate ?? "",
+                device.updatedDate ?? "",
                 device.id
             ]
-            .map { field in
-                // Escape quotes and wrap in quotes if contains comma
+            let row = (fields + fields2 + fields3)
+            .map { field -> String in
                 let escaped = field.replacingOccurrences(of: "\"", with: "\"\"")
-                return field.contains(",") ? "\"\(escaped)\"" : escaped
+                return field.contains(",") || field.contains("\"") ? "\"\(escaped)\"" : escaped
             }
             .joined(separator: ",")
-            
+
             csv += row + "\n"
         }
-        
+
         self.csvString = csv
     }
     

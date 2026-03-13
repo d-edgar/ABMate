@@ -55,26 +55,26 @@ extension ABMViewModel {
         }
     }
     
-    // Get AppleCare Coverage for a device
-    func getAppleCareCoverage(deviceId: String) async -> AppleCareCoverage? {
+    // Get AppleCare Coverage entries for a device
+    func getAppleCareCoverage(deviceId: String) async -> [AppleCareCoverage] {
         guard let assertion = clientAssertion else {
             await MainActor.run { errorMessage = "Connect to ABM first" }
-            return nil
+            return []
         }
-        
+
         do {
             let token = try await apiService.getAccessToken(
                 clientAssertion: assertion,
                 clientId: clientId
             )
-            
-            let coverage = try await apiService.getAppleCareCoverage(deviceId: deviceId, accessToken: token)
-            print("ViewModel: AppleCare coverage retrieved successfully")
-            return coverage
+
+            let coverages = try await apiService.getAppleCareCoverage(deviceId: deviceId, accessToken: token)
+            print("ViewModel: AppleCare coverage retrieved successfully (\(coverages.count) entries)")
+            return coverages
         } catch {
             print("ViewModel: AppleCare error - \(error.localizedDescription)")
             await MainActor.run { errorMessage = error.localizedDescription }
-            return nil
+            return []
         }
     }
     

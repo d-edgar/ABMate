@@ -58,16 +58,84 @@ struct ContentView: View {
                     }
                     
                     Spacer()
-                    
-                    // Connection Status Badge
-                    ConnectionBadge(isConnected: viewModel.clientAssertion != nil)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
-                
+
+                // Active Profile Indicator with connection state
+                if let profileName = viewModel.activeProfileName {
+                    VStack(spacing: 6) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(viewModel.isConnected ? Color.green : Color.red)
+                                .frame(width: 8, height: 8)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(profileName)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.primary)
+                                    .lineLimit(1)
+                                Text(viewModel.isConnected ? "Connected" : "Not Connected")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(viewModel.isConnected ? .green : .red)
+                            }
+                            Spacer()
+                        }
+
+                        if !viewModel.isConnected {
+                            Button(action: { viewModel.reconnect() }) {
+                                HStack(spacing: 4) {
+                                    if viewModel.isLoading {
+                                        ProgressView()
+                                            .scaleEffect(0.5)
+                                            .frame(width: 12, height: 12)
+                                    } else {
+                                        Image(systemName: "bolt.fill")
+                                            .font(.system(size: 10))
+                                    }
+                                    Text("Connect")
+                                        .font(.system(size: 11, weight: .semibold))
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 5)
+                                .background(Color.accentColor.opacity(0.12))
+                                .foregroundColor(.accentColor)
+                                .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(viewModel.isLoading)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(viewModel.isConnected ? Color.green.opacity(0.06) : Color.red.opacity(0.06))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(viewModel.isConnected ? Color.green.opacity(0.2) : Color.red.opacity(0.2), lineWidth: 1)
+                            )
+                    )
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 4)
+                    .contextMenu {
+                        Button(action: { showingSettings = true }) {
+                            Label("Connection Settings", systemImage: "gearshape")
+                        }
+                        if viewModel.isConnected {
+                            Button(action: { viewModel.reconnect() }) {
+                                Label("Reconnect", systemImage: "arrow.clockwise")
+                            }
+                        } else {
+                            Button(action: { viewModel.reconnect() }) {
+                                Label("Connect", systemImage: "bolt.fill")
+                            }
+                        }
+                    }
+                }
+
                 Divider()
                     .padding(.horizontal, 12)
-                
+
                 // Navigation List
                 List(NavigationItem.allCases, selection: $selectedNavItem) { item in
                     NavigationLink(value: item) {
@@ -78,7 +146,7 @@ struct ContentView: View {
                 
                 Divider()
                     .padding(.horizontal, 12)
-                
+
                 // Settings Button
                 Button(action: { showingSettings = true }) {
                     HStack {
@@ -154,7 +222,18 @@ struct ConnectionSettingsSheet: View {
     @ObservedObject var viewModel: ABMViewModel
     @Environment(\.dismiss) var dismiss
     @State private var showingKeyImporter = false
-    
+    @State private var profileName = ""
+    @State private var showingSaveProfile = false
+    @State private var isCreatingNewProfile = false
+    @State private var showingDeleteConfirm = false
+    @State private var profileToDelete: ConnectionProfile?
+    // Snapshot of credentials before "New Profile" clears them
+    @State private var previousClientId = ""
+    @State private var previousKeyId = ""
+    @State private var previousPrivateKey = ""
+    @State private var previousProfileId: UUID?
+    @State private var previousAssertion: String?
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -171,11 +250,151 @@ struct ConnectionSettingsSheet: View {
                 .buttonStyle(.plain)
             }
             .padding(20)
-            
+
             Divider()
-            
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    // Connection Profiles Section
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Connection Profiles", systemImage: "person.2.badge.gearshape")
+                            .font(.headline)
+
+                        if viewModel.savedProfiles.isEmpty {
+                            Text("No saved profiles. Fill in credentials and save a profile to get started.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            VStack(spacing: 8) {
+                                ForEach(viewModel.savedProfiles) { profile in
+                                    HStack(spacing: 12) {
+                                        Image(systemName: profile.id == viewModel.activeProfileId ? "checkmark.circle.fill" : "circle")
+                                            .foregroundColor(profile.id == viewModel.activeProfileId ? .green : .secondary)
+                                            .font(.title3)
+
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(profile.name)
+                                                .font(.system(.body, weight: .medium))
+                                            Text(profile.clientId.prefix(30) + (profile.clientId.count > 30 ? "..." : ""))
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+
+                                        Spacer()
+
+                                        if profile.id != viewModel.activeProfileId {
+                                            Button("Switch") {
+                                                viewModel.switchToProfile(profile)
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .controlSize(.small)
+                                        } else {
+                                            Text("Active")
+                                                .font(.caption)
+                                                .fontWeight(.semibold)
+                                                .foregroundColor(.green)
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                                .background(
+                                                    Capsule().fill(Color.green.opacity(0.1))
+                                                )
+                                        }
+
+                                        Button(action: {
+                                            profileToDelete = profile
+                                            showingDeleteConfirm = true
+                                        }) {
+                                            Image(systemName: "trash")
+                                                .foregroundColor(.red.opacity(0.7))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                    .padding(10)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .fill(profile.id == viewModel.activeProfileId ? Color.green.opacity(0.05) : Color(NSColor.controlBackgroundColor))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(profile.id == viewModel.activeProfileId ? Color.green.opacity(0.3) : Color.clear, lineWidth: 1)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Profile Actions
+                        if showingSaveProfile {
+                            HStack(spacing: 8) {
+                                TextField("Profile name...", text: $profileName)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 200)
+
+                                Button("Save") {
+                                    if !profileName.isEmpty {
+                                        viewModel.saveProfile(name: profileName)
+                                        profileName = ""
+                                        showingSaveProfile = false
+                                        isCreatingNewProfile = false
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .disabled(profileName.isEmpty)
+
+                                Button("Cancel") {
+                                    // Restore previous credentials if we were creating a new profile
+                                    if isCreatingNewProfile {
+                                        viewModel.clientId = previousClientId
+                                        viewModel.keyId = previousKeyId
+                                        viewModel.privateKey = previousPrivateKey
+                                        viewModel.activeProfileId = previousProfileId
+                                        viewModel.clientAssertion = previousAssertion
+                                    }
+                                    showingSaveProfile = false
+                                    isCreatingNewProfile = false
+                                    profileName = ""
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        } else {
+                            HStack(spacing: 8) {
+                                Button(action: {
+                                    // Snapshot current credentials before clearing
+                                    previousClientId = viewModel.clientId
+                                    previousKeyId = viewModel.keyId
+                                    previousPrivateKey = viewModel.privateKey
+                                    previousProfileId = viewModel.activeProfileId
+                                    previousAssertion = viewModel.clientAssertion
+
+                                    // Clear credentials for a fresh profile
+                                    viewModel.clientId = ""
+                                    viewModel.keyId = ""
+                                    viewModel.privateKey = ""
+                                    viewModel.activeProfileId = nil
+                                    viewModel.clientAssertion = nil
+                                    viewModel.statusMessage = nil
+                                    viewModel.errorMessage = nil
+                                    isCreatingNewProfile = true
+                                    showingSaveProfile = true
+                                }) {
+                                    Label("New Profile", systemImage: "plus.circle")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+
+                                Button(action: { showingSaveProfile = true }) {
+                                    Label("Save Current", systemImage: "square.and.arrow.down")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(viewModel.clientId.isEmpty || viewModel.keyId.isEmpty || viewModel.privateKey.isEmpty)
+                            }
+                        }
+                    }
+
+                    Divider()
+
                     // Credentials Section
                     VStack(alignment: .leading, spacing: 16) {
                         Label("API Credentials", systemImage: "key.fill")
@@ -273,7 +492,18 @@ struct ConnectionSettingsSheet: View {
                 .padding(20)
             }
         }
-        .frame(width: 480, height: 520)
+        .frame(width: 480, height: 620)
+        .alert("Delete Profile", isPresented: $showingDeleteConfirm) {
+            Button("Cancel", role: .cancel) { profileToDelete = nil }
+            Button("Delete", role: .destructive) {
+                if let profile = profileToDelete {
+                    viewModel.deleteProfile(profile)
+                    profileToDelete = nil
+                }
+            }
+        } message: {
+            Text("Are you sure you want to delete \"\(profileToDelete?.name ?? "")\"? This cannot be undone.")
+        }
         .fileImporter(
             isPresented: $showingKeyImporter,
             allowedContentTypes: [.plainText, .item],
@@ -577,8 +807,8 @@ struct DashboardView: View {
                     )
                 }
                 
-                // Connection Status
-                if viewModel.clientAssertion == nil {
+                // Connection Status — only show if no profiles exist yet
+                if viewModel.clientAssertion == nil && viewModel.savedProfiles.isEmpty {
                     HStack(spacing: 16) {
                         Image(systemName: "link.badge.plus")
                             .font(.system(size: 24))
@@ -782,43 +1012,55 @@ struct EmptyStateCard: View {
 // MARK: - Devices View
 struct DevicesView: View {
     @ObservedObject var viewModel: ABMViewModel
-    @State private var selectedDevice: OrgDevice?
-    @State private var showingDetails = false
+    @State private var selectedDeviceIds = Set<OrgDevice.ID>()
+    @State private var detailDevice: OrgDevice?
     @State private var searchText = ""
     @State private var showingExporter = false
     @State private var filterOS = "All"
-    
-    var filteredDevices: [OrgDevice] {
+    @State private var sortOrder = [KeyPathComparator(\OrgDevice.sortableAddedDate, order: .reverse)]
+    @State private var displayedDevices: [OrgDevice] = []
+    @State private var formattedAddedDates: [String: String] = [:]
+    @State private var formattedUpdatedDates: [String: String] = [:]
+
+    private func updateDisplayedDevices() {
         var devices = viewModel.devices
-        
+
         if filterOS != "All" {
-            devices = devices.filter { device in
-                let os = device.os?.lowercased() ?? ""
-                switch filterOS {
-                case "Mac":
-                    return os == "mac"
-                case "iPhone":
-                    return os == "iphone"
-                case "iPad":
-                    return os == "ipad"
-                case "Apple TV":
-                    return os == "appletv"
-                default:
-                    return true
-                }
+            let target: String
+            switch filterOS {
+            case "Apple TV": target = "appletv"
+            default: target = filterOS.lowercased()
             }
+            devices = devices.filter { ($0.os?.lowercased() ?? "") == target }
         }
-        
+
         if !searchText.isEmpty {
             devices = devices.filter { device in
                 device.serialNumber.localizedCaseInsensitiveContains(searchText) ||
-                (device.model ?? "").localizedCaseInsensitiveContains(searchText)
+                (device.model ?? "").localizedCaseInsensitiveContains(searchText) ||
+                (device.productType ?? "").localizedCaseInsensitiveContains(searchText) ||
+                (device.orderNumber ?? "").localizedCaseInsensitiveContains(searchText)
             }
         }
-        
-        return devices
+
+        let sorted = devices.sorted(using: sortOrder)
+        displayedDevices = sorted
+
+        // Pre-cache formatted dates so cells don't recompute on every render
+        var added = formattedAddedDates
+        var updated = formattedUpdatedDates
+        for device in sorted {
+            if added[device.id] == nil {
+                added[device.id] = OrgDevice.formatDate(device.addedDate)
+            }
+            if updated[device.id] == nil {
+                updated[device.id] = OrgDevice.formatDate(device.updatedDate)
+            }
+        }
+        formattedAddedDates = added
+        formattedUpdatedDates = updated
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -832,9 +1074,9 @@ struct DevicesView: View {
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
-                    
+
                     Spacer()
-                    
+
                     HStack(spacing: 12) {
                         // Search
                         HStack(spacing: 8) {
@@ -856,7 +1098,7 @@ struct DevicesView: View {
                             RoundedRectangle(cornerRadius: 8)
                                 .fill(Color(NSColor.controlBackgroundColor))
                         )
-                        
+
                         // Filter
                         Picker("OS", selection: $filterOS) {
                             Text("All").tag("All")
@@ -867,12 +1109,12 @@ struct DevicesView: View {
                         }
                         .pickerStyle(.menu)
                         .frame(width: 100)
-                        
+
                         Button(action: { showingExporter = true }) {
                             Label("Export", systemImage: "square.and.arrow.up")
                         }
                         .disabled(viewModel.devices.isEmpty)
-                        
+
                         Button(action: { viewModel.fetchDevices() }) {
                             Label("Refresh", systemImage: "arrow.clockwise")
                         }
@@ -882,9 +1124,9 @@ struct DevicesView: View {
             }
             .padding(20)
             .background(Color(NSColor.windowBackgroundColor))
-            
+
             Divider()
-            
+
             // Content
             if viewModel.devices.isEmpty {
                 Spacer()
@@ -894,24 +1136,93 @@ struct DevicesView: View {
                     description: Text("Connect to ABM to load your devices")
                 )
                 Spacer()
-            } else if filteredDevices.isEmpty {
+            } else if displayedDevices.isEmpty {
                 Spacer()
                 ContentUnavailableView.search(text: searchText)
                 Spacer()
             } else {
-                List(filteredDevices, selection: $selectedDevice) { device in
-                    DeviceRow(device: device)
-                        .onTapGesture(count: 2) {
-                            selectedDevice = device
-                            showingDetails = true
+                Table(displayedDevices, selection: $selectedDeviceIds, sortOrder: $sortOrder) {
+                    TableColumn("Model", value: \.sortableModel) { device in
+                        HStack(spacing: 8) {
+                            Image(systemName: deviceIcon(for: device))
+                                .foregroundColor(.blue)
+                                .frame(width: 16)
+                            Text(device.model ?? device.serialNumber)
+                                .lineLimit(1)
                         }
+                    }
+                    .width(min: 140, ideal: 180)
+
+                    TableColumn("Serial Number", value: \.serialNumber) { device in
+                        Text(device.serialNumber)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    .width(min: 110, ideal: 130)
+
+                    TableColumn("OS", value: \.sortableOS) { device in
+                        Text(device.os ?? "—")
+                            .lineLimit(1)
+                    }
+                    .width(min: 60, ideal: 70)
+
+                    TableColumn("Product Type", value: \.sortableProductType) { device in
+                        Text(device.productType ?? "—")
+                            .font(.caption)
+                            .lineLimit(1)
+                    }
+                    .width(min: 100, ideal: 130)
+
+                    TableColumn("Status", value: \.sortableStatus) { device in
+                        let status = device.enrollmentState ?? "Unknown"
+                        let color: Color = {
+                            switch status.uppercased() {
+                            case "ASSIGNED": return .green
+                            case "UNASSIGNED": return .orange
+                            default: return .gray
+                            }
+                        }()
+                        Text(status)
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(color.opacity(0.15)))
+                            .foregroundColor(color)
+                    }
+                    .width(min: 90, ideal: 100)
+
+                    TableColumn("Added", value: \.sortableAddedDate) { device in
+                        Text(formattedAddedDates[device.id] ?? "—")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    .width(min: 85, ideal: 100)
+
                 }
-                .listStyle(.inset(alternatesRowBackgrounds: true))
+                .tableStyle(.inset(alternatesRowBackgrounds: true))
+                .contextMenu(forSelectionType: OrgDevice.ID.self) { ids in
+                    if let id = ids.first, let device = viewModel.devices.first(where: { $0.id == id }) {
+                        Button("View Details") {
+                            detailDevice = device
+                        }
+                        Button("Copy Serial Number") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(device.serialNumber, forType: .string)
+                        }
+                    }
+                } primaryAction: { ids in
+                    if let id = ids.first, let device = viewModel.devices.first(where: { $0.id == id }) {
+                        detailDevice = device
+                    }
+                }
             }
-            
+
             // Status Bar
             HStack {
-                Text("\(filteredDevices.count) of \(viewModel.devices.count) devices")
+                Text("\(displayedDevices.count) of \(viewModel.devices.count) devices")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
@@ -927,14 +1238,24 @@ struct DevicesView: View {
             .padding(.vertical, 8)
             .background(Color(NSColor.controlBackgroundColor))
         }
-        .sheet(isPresented: $showingDetails) {
-            if let device = selectedDevice {
-                DeviceDetailSheet(device: device, viewModel: viewModel)
+        .onAppear { updateDisplayedDevices() }
+        .onChange(of: sortOrder) { _, _ in
+            // Disable implicit animations — animating 1,000+ rows repositioning is extremely slow
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                updateDisplayedDevices()
             }
+        }
+        .onChange(of: filterOS) { _, _ in updateDisplayedDevices() }
+        .onChange(of: searchText) { _, _ in updateDisplayedDevices() }
+        .onChange(of: viewModel.devices) { _, _ in updateDisplayedDevices() }
+        .sheet(item: $detailDevice) { device in
+            DeviceDetailSheet(device: device, viewModel: viewModel)
         }
         .fileExporter(
             isPresented: $showingExporter,
-            document: CSVDocument(devices: filteredDevices),
+            document: CSVDocument(devices: displayedDevices),
             contentType: .commaSeparatedText,
             defaultFilename: "ABMate_devices_\(Date().formatted(date: .abbreviated, time: .omitted)).csv"
         ) { result in
@@ -946,13 +1267,8 @@ struct DevicesView: View {
             }
         }
     }
-}
 
-// MARK: - Device Row
-struct DeviceRow: View {
-    let device: OrgDevice
-    
-    var deviceIcon: String {
+    private func deviceIcon(for device: OrgDevice) -> String {
         switch device.os?.lowercased() {
         case "iphone": return "iphone"
         case "ipad": return "ipad"
@@ -960,69 +1276,6 @@ struct DeviceRow: View {
         case "appletv": return "appletv"
         default: return "questionmark.square"
         }
-    }
-    
-    var statusColor: Color {
-        switch device.enrollmentState?.uppercased() {
-        case "ASSIGNED": return .green
-        case "UNASSIGNED": return .orange
-        default: return .gray
-        }
-    }
-    
-    var body: some View {
-        HStack(spacing: 14) {
-            // Device Icon
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.blue.opacity(0.1))
-                    .frame(width: 40, height: 40)
-                Image(systemName: deviceIcon)
-                    .font(.title3)
-                    .foregroundColor(.blue)
-            }
-            
-            // Info
-            VStack(alignment: .leading, spacing: 3) {
-                Text(device.model ?? device.serialNumber)
-                    .font(.system(.body, weight: .medium))
-                
-                HStack(spacing: 12) {
-                    if let productFamily = device.os {
-                        Text(productFamily)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    if let productType = device.productType {
-                        Text(productType)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
-            
-            Spacer()
-            
-            // Serial
-            Text(device.serialNumber)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.secondary)
-            
-            // Status Badge
-            Text(device.enrollmentState ?? "Unknown")
-                .font(.caption)
-                .fontWeight(.medium)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(
-                    Capsule()
-                        .fill(statusColor.opacity(0.15))
-                )
-                .foregroundColor(statusColor)
-        }
-        .padding(.vertical, 6)
-        .contentShape(Rectangle())
     }
 }
 
@@ -1032,7 +1285,7 @@ struct DeviceDetailSheet: View {
     @ObservedObject var viewModel: ABMViewModel
     @Environment(\.dismiss) var dismiss
     @State private var assignedServer: String?
-    @State private var appleCareCoverage: AppleCareCoverage?
+    @State private var appleCareCoverages: [AppleCareCoverage] = []
     @State private var isLoadingAppleCare = false
     @State private var isLoadingServer = false
     @State private var appleCareError: String?
@@ -1077,6 +1330,17 @@ struct DeviceDetailSheet: View {
                             DetailItem(label: "Product Family", value: device.os ?? "N/A")
                             DetailItem(label: "Product Type", value: device.productType ?? "N/A")
                             DetailItem(label: "Status", value: device.enrollmentState ?? "N/A")
+                            if let capacity = device.capacity, !capacity.isEmpty {
+                                DetailItem(label: "Capacity", value: capacity)
+                            }
+                            if let color = device.color, !color.isEmpty {
+                                DetailItem(label: "Color", value: color)
+                            }
+                            if let orderNumber = device.orderNumber, !orderNumber.isEmpty {
+                                DetailItem(label: "Order Number", value: orderNumber)
+                            }
+                            DetailItem(label: "Added to Org", value: OrgDevice.formatDate(device.addedDate))
+                            DetailItem(label: "Last Updated", value: OrgDevice.formatDate(device.updatedDate))
                             DetailItem(label: "Device ID", value: device.id, monospaced: true)
                         }
                     }
@@ -1135,19 +1399,57 @@ struct DeviceDetailSheet: View {
                                     .scaleEffect(0.7)
                             }
                         }
-                        
-                        if let coverage = appleCareCoverage {
-                            LazyVGrid(columns: [
-                                GridItem(.flexible()),
-                                GridItem(.flexible())
-                            ], spacing: 12) {
-                                CoverageItem(label: "Coverage Status", value: coverage.attributes.coverageStatus ?? "N/A", isActive: coverage.attributes.coverageStatus == "ACTIVE")
-                                CoverageItem(label: "Warranty Status", value: coverage.attributes.warrantyStatus ?? "N/A", isActive: coverage.attributes.warrantyStatus == "ACTIVE")
-                                DetailItem(label: "Coverage End Date", value: coverage.attributes.coverageEndDate ?? "N/A")
-                                DetailItem(label: "Purchase Date", value: coverage.attributes.purchaseDate ?? "N/A")
-                                DetailItem(label: "Repair Coverage", value: coverage.attributes.repairCoverage ?? "N/A")
-                                DetailItem(label: "Tech Support", value: coverage.attributes.technicalSupportCoverage ?? "N/A")
-                                DetailItem(label: "Plan Type", value: coverage.attributes.appleCarePlanType ?? "N/A")
+
+                        if !appleCareCoverages.isEmpty {
+                            ForEach(appleCareCoverages) { coverage in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    // Coverage type header (e.g. "AppleCare" or "Limited Warranty")
+                                    HStack(spacing: 6) {
+                                        Circle()
+                                            .fill(coverage.attributes.status == "ACTIVE" ? Color.green : Color.orange)
+                                            .frame(width: 8, height: 8)
+                                        Text(coverage.attributes.description ?? coverage.type)
+                                            .font(.system(.subheadline, weight: .semibold))
+                                        Spacer()
+                                        Text(coverage.attributes.status ?? "Unknown")
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 3)
+                                            .background(
+                                                Capsule()
+                                                    .fill((coverage.attributes.status == "ACTIVE" ? Color.green : Color.orange).opacity(0.15))
+                                            )
+                                            .foregroundColor(coverage.attributes.status == "ACTIVE" ? .green : .orange)
+                                    }
+
+                                    LazyVGrid(columns: [
+                                        GridItem(.flexible()),
+                                        GridItem(.flexible())
+                                    ], spacing: 8) {
+                                        if let start = coverage.attributes.startDateTime {
+                                            DetailItem(label: "Start Date", value: String(start.prefix(10)))
+                                        }
+                                        if let end = coverage.attributes.endDateTime {
+                                            DetailItem(label: "End Date", value: String(end.prefix(10)))
+                                        }
+                                        if let agreement = coverage.attributes.agreementNumber {
+                                            DetailItem(label: "Agreement #", value: agreement)
+                                        }
+                                        if let renewable = coverage.attributes.isRenewable {
+                                            DetailItem(label: "Renewable", value: renewable ? "Yes" : "No")
+                                        }
+                                    }
+                                }
+                                .padding(12)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                                )
                             }
                         } else if let error = appleCareError {
                             HStack {
@@ -1179,7 +1481,7 @@ struct DeviceDetailSheet: View {
                 .padding(20)
             }
         }
-        .frame(width: 560, height: 580)
+        .frame(width: 560, height: 680)
         .onAppear {
             // Auto-load MDM server on appear
             loadAssignedServer()
@@ -1202,13 +1504,13 @@ struct DeviceDetailSheet: View {
         appleCareError = nil
         Task { @MainActor in
             print("Loading AppleCare for device: \(device.id)")
-            let coverage = await viewModel.getAppleCareCoverage(deviceId: device.id)
-            if let coverage = coverage {
-                print("Got AppleCare coverage: \(coverage.attributes.coverageStatus ?? "nil")")
-                appleCareCoverage = coverage
+            let coverages = await viewModel.getAppleCareCoverage(deviceId: device.id)
+            if !coverages.isEmpty {
+                print("Got \(coverages.count) AppleCare coverage entries")
+                appleCareCoverages = coverages
             } else {
                 print("No AppleCare coverage returned")
-                appleCareError = viewModel.errorMessage ?? "Unable to fetch coverage"
+                appleCareError = viewModel.errorMessage ?? "No coverage information available for this device."
             }
             isLoadingAppleCare = false
         }
@@ -1355,7 +1657,22 @@ struct DeviceAssignmentView: View {
     @State private var selectedDevices: Set<String> = []
     @State private var selectedMDM: String = ""
     @State private var actionType = "ASSIGN"
-    
+    @State private var searchText = ""
+    @State private var showingConfirmation = false
+
+    var filteredDevices: [OrgDevice] {
+        if searchText.isEmpty {
+            return viewModel.devices
+        }
+        let query = searchText.lowercased()
+        return viewModel.devices.filter { device in
+            let model = (device.model ?? "").lowercased()
+            let serial = device.serialNumber.lowercased()
+            let productType = (device.productType ?? "").lowercased()
+            return model.contains(query) || serial.contains(query) || productType.contains(query)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -1415,14 +1732,50 @@ struct DeviceAssignmentView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        
+
+                        // Search Bar
+                        HStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass")
+                                .foregroundColor(.secondary)
+                            TextField("Search by model, serial number, or product type...", text: $searchText)
+                                .textFieldStyle(.plain)
+                            if !searchText.isEmpty {
+                                Button(action: { searchText = "" }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color(NSColor.controlBackgroundColor))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(NSColor.separatorColor), lineWidth: 1)
+                        )
+
                         if viewModel.devices.isEmpty {
                             Text("No devices available. Connect to ABM first.")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                                 .padding()
+                        } else if filteredDevices.isEmpty {
+                            Text("No devices match \"\(searchText)\"")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .padding()
                         } else {
-                            List(viewModel.devices, selection: $selectedDevices) { device in
+                            HStack {
+                                Text("\(filteredDevices.count) device\(filteredDevices.count == 1 ? "" : "s") shown")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                            }
+
+                            List(filteredDevices, selection: $selectedDevices) { device in
                                 HStack {
                                     Text(device.model ?? device.serialNumber)
                                     Spacer()
@@ -1438,12 +1791,7 @@ struct DeviceAssignmentView: View {
                     
                     // Execute Button
                     Button(action: {
-                        Task {
-                            await viewModel.assignDevices(
-                                deviceIds: Array(selectedDevices),
-                                mdmId: actionType == "ASSIGN" ? selectedMDM : nil
-                            )
-                        }
+                        showingConfirmation = true
                     }) {
                         HStack {
                             if viewModel.isLoading {
@@ -1460,6 +1808,24 @@ struct DeviceAssignmentView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .disabled(selectedDevices.isEmpty || (actionType == "ASSIGN" && selectedMDM.isEmpty) || viewModel.isLoading)
+                    .alert("Confirm \(actionType == "ASSIGN" ? "Assignment" : "Unassignment")", isPresented: $showingConfirmation) {
+                        Button("Cancel", role: .cancel) { }
+                        Button(actionType == "ASSIGN" ? "Assign" : "Unassign", role: .destructive) {
+                            Task {
+                                await viewModel.assignDevices(
+                                    deviceIds: Array(selectedDevices),
+                                    mdmId: actionType == "ASSIGN" ? selectedMDM : nil
+                                )
+                            }
+                        }
+                    } message: {
+                        if actionType == "ASSIGN" {
+                            let serverName = viewModel.mdmServers.first(where: { $0.id == selectedMDM })?.attributes.serverName ?? "selected server"
+                            Text("Are you sure you want to assign \(selectedDevices.count) device\(selectedDevices.count == 1 ? "" : "s") to \(serverName)?")
+                        } else {
+                            Text("Are you sure you want to unassign \(selectedDevices.count) device\(selectedDevices.count == 1 ? "" : "s") from their MDM server?")
+                        }
+                    }
                     
                     // Status Message
                     if let status = viewModel.statusMessage {

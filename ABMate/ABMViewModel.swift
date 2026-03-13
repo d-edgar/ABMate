@@ -22,7 +22,20 @@ class ABMViewModel: ObservableObject {
     @Published var clientId = ""
     @Published var keyId = ""
     @Published var privateKey = ""
-    
+
+    // Connection Profiles
+    @Published var savedProfiles: [ConnectionProfile] = []
+    @Published var activeProfileId: UUID?
+
+    var activeProfileName: String? {
+        savedProfiles.first(where: { $0.id == activeProfileId })?.name
+    }
+
+    /// Whether we have an active JWT and have fetched data
+    var isConnected: Bool {
+        clientAssertion != nil && (!devices.isEmpty || !mdmServers.isEmpty)
+    }
+
     internal let apiService = APIService()
     internal var clientAssertion: String?
     
@@ -77,7 +90,7 @@ class ABMViewModel: ObservableObject {
         }
     }
     
-    // Connect to ABM
+    // Connect to ABM (with one automatic retry on transient network errors)
     func connectToABM() {
         guard let assertion = clientAssertion else {
             errorMessage = "Generate JWT first"
@@ -87,30 +100,48 @@ class ABMViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         statusMessage = nil
-        devices = []
-        mdmServers = []
 
         Task {
-            do {
-                let token = try await apiService.getAccessToken(
-                    clientAssertion: assertion,
-                    clientId: clientId
-                )
-                
-                print("Successfully obtained access token. Fetching data...")
-                
-                // Fetch devices and servers
-                let fetchedDevices = try await apiService.fetchDevices(accessToken: token)
-                print("Successfully fetched \(fetchedDevices.count) devices.")
-                devices = fetchedDevices
-                
-                let fetchedServers = try await apiService.fetchMDMServers(accessToken: token)
-                print("Successfully fetched \(fetchedServers.count) servers.")
-                mdmServers = fetchedServers
-                
-                statusMessage = "Connected to ABM. Fetched \(devices.count) devices and \(mdmServers.count) servers."
-            } catch {
+            var lastError: Error?
+
+            for attempt in 1...2 {
+                do {
+                    let token = try await apiService.getAccessToken(
+                        clientAssertion: assertion,
+                        clientId: clientId
+                    )
+
+                    print("Successfully obtained access token. Fetching data...")
+
+                    // Fetch devices and servers — only replace on success
+                    let fetchedDevices = try await apiService.fetchDevices(accessToken: token)
+                    print("Successfully fetched \(fetchedDevices.count) devices.")
+
+                    let fetchedServers = try await apiService.fetchMDMServers(accessToken: token)
+                    print("Successfully fetched \(fetchedServers.count) servers.")
+
+                    devices = fetchedDevices
+                    mdmServers = fetchedServers
+
+                    statusMessage = "Connected to ABM. Fetched \(devices.count) devices and \(mdmServers.count) servers."
+                    lastError = nil
+                    break
+                } catch let error as NSError where error.domain == NSURLErrorDomain && error.code == -1005 {
+                    lastError = error
+                    if attempt == 1 {
+                        print("Network connection lost, retrying in 3s...")
+                        statusMessage = "Connection interrupted, retrying..."
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    }
+                } catch {
+                    lastError = error
+                    break
+                }
+            }
+
+            if let error = lastError {
                 print("Error during ABM connection: \(error)")
+                statusMessage = nil
                 errorMessage = "ABM Connection Error: \(error.localizedDescription)"
             }
             isLoading = false
@@ -122,14 +153,185 @@ class ABMViewModel: ObservableObject {
         UserDefaults.standard.set(clientId, forKey: "clientId")
         UserDefaults.standard.set(keyId, forKey: "keyId")
     }
-    
+
     // Load saved credentials
     func loadCredentials() {
         clientId = UserDefaults.standard.string(forKey: "clientId") ?? ""
         keyId = UserDefaults.standard.string(forKey: "keyId") ?? ""
+        loadProfiles()
+    }
+
+    // MARK: - Connection Profiles
+
+    func saveProfile(name: String) {
+        let profile = ConnectionProfile(
+            name: name,
+            clientId: clientId,
+            keyId: keyId,
+            privateKey: privateKey
+        )
+
+        // Replace if a profile with the same name exists
+        if let index = savedProfiles.firstIndex(where: { $0.name == name }) {
+            // Clean up old Keychain entry if UUID changed
+            let oldId = savedProfiles[index].id
+            if oldId != profile.id {
+                KeychainHelper.deletePrivateKey(forProfileId: oldId)
+            }
+            savedProfiles[index] = profile
+        } else {
+            savedProfiles.append(profile)
+        }
+
+        // Store private key securely in Keychain
+        KeychainHelper.savePrivateKey(privateKey, forProfileId: profile.id)
+
+        activeProfileId = profile.id
+        persistProfiles()
+    }
+
+    func switchToProfile(_ profile: ConnectionProfile) {
+        clientId = profile.clientId
+        keyId = profile.keyId
+        privateKey = profile.privateKey
+        activeProfileId = profile.id
+
+        // Reset connection state when switching
+        clientAssertion = nil
+        devices = []
+        mdmServers = []
+        statusMessage = nil
+        errorMessage = nil
+        lastActivityId = nil
+
+        saveCredentials()
+        UserDefaults.standard.set(profile.id.uuidString, forKey: "activeProfileId")
+    }
+
+    func deleteProfile(_ profile: ConnectionProfile) {
+        KeychainHelper.deletePrivateKey(forProfileId: profile.id)
+        savedProfiles.removeAll { $0.id == profile.id }
+        if activeProfileId == profile.id {
+            activeProfileId = nil
+        }
+        persistProfiles()
+    }
+
+    private func persistProfiles() {
+        if let data = try? JSONEncoder().encode(savedProfiles) {
+            UserDefaults.standard.set(data, forKey: "connectionProfiles")
+        }
+        if let id = activeProfileId {
+            UserDefaults.standard.set(id.uuidString, forKey: "activeProfileId")
+        }
+    }
+
+    private func loadProfiles() {
+        if let data = UserDefaults.standard.data(forKey: "connectionProfiles"),
+           var profiles = try? JSONDecoder().decode([ConnectionProfile].self, from: data) {
+
+            // Migrate: check if old JSON has privateKey that hasn't been moved to Keychain yet
+            var needsResave = false
+            if let rawArray = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+                for (i, rawProfile) in rawArray.enumerated() where i < profiles.count {
+                    if let legacyKey = rawProfile["privateKey"] as? String, !legacyKey.isEmpty {
+                        // Old format had the key in JSON — migrate it to Keychain
+                        if KeychainHelper.readPrivateKey(forProfileId: profiles[i].id) == nil {
+                            KeychainHelper.savePrivateKey(legacyKey, forProfileId: profiles[i].id)
+                            profiles[i].privateKey = legacyKey
+                            needsResave = true
+                        }
+                    }
+                }
+            }
+
+            // Hydrate private keys from Keychain
+            for i in profiles.indices {
+                if profiles[i].privateKey.isEmpty,
+                   let key = KeychainHelper.readPrivateKey(forProfileId: profiles[i].id) {
+                    profiles[i].privateKey = key
+                }
+            }
+            savedProfiles = profiles
+
+            // Re-persist to strip privateKey from UserDefaults JSON after migration
+            if needsResave {
+                persistProfiles()
+            }
+        }
+        if let idString = UserDefaults.standard.string(forKey: "activeProfileId"),
+           let id = UUID(uuidString: idString) {
+            activeProfileId = id
+            // Also restore the active profile's credentials into the fields
+            if let profile = savedProfiles.first(where: { $0.id == id }) {
+                clientId = profile.clientId
+                keyId = profile.keyId
+                privateKey = profile.privateKey
+            }
+        }
     }
     
     
+    // Quick reconnect: generates JWT then connects to ABM in one step
+    // Includes one automatic retry on network errors (e.g. after switching profiles)
+    func reconnect() {
+        guard !clientId.isEmpty, !keyId.isEmpty, !privateKey.isEmpty else {
+            errorMessage = "Missing credentials. Open Connection Settings to configure."
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+        statusMessage = nil
+
+        Task {
+            var lastError: Error?
+
+            for attempt in 1...2 {
+                do {
+                    let credentials = APICredentials(
+                        clientId: clientId,
+                        keyId: keyId,
+                        privateKey: privateKey
+                    )
+                    clientAssertion = try JWTGenerator.createClientAssertion(credentials: credentials)
+
+                    let token = try await apiService.getAccessToken(
+                        clientAssertion: clientAssertion!,
+                        clientId: clientId
+                    )
+
+                    // Only replace data on success
+                    let fetchedDevices = try await apiService.fetchDevices(accessToken: token)
+                    let fetchedServers = try await apiService.fetchMDMServers(accessToken: token)
+
+                    devices = fetchedDevices
+                    mdmServers = fetchedServers
+
+                    statusMessage = "Connected to ABM. Fetched \(devices.count) devices and \(mdmServers.count) servers."
+                    lastError = nil
+                    break
+                } catch let error as NSError where error.domain == NSURLErrorDomain && error.code == -1005 {
+                    // Network connection lost — likely a transient HTTP/2 issue
+                    lastError = error
+                    if attempt == 1 {
+                        statusMessage = "Connection interrupted, retrying..."
+                        try? await Task.sleep(nanoseconds: 3_000_000_000) // 3 seconds
+                    }
+                } catch {
+                    lastError = error
+                    break // Non-network error, don't retry
+                }
+            }
+
+            if let error = lastError {
+                statusMessage = nil
+                errorMessage = "Reconnect Error: \(error.localizedDescription)"
+            }
+            isLoading = false
+        }
+    }
+
     // Get current access token
     func getCurrentAccessToken() async -> String? {
         guard let assertion = clientAssertion else { return nil }
