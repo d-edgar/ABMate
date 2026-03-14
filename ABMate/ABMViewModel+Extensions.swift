@@ -55,26 +55,26 @@ extension ABMViewModel {
         }
     }
     
-    // Get AppleCare Coverage for a device
-    func getAppleCareCoverage(deviceId: String) async -> AppleCareCoverage? {
+    // Get AppleCare Coverage entries for a device
+    func getAppleCareCoverage(deviceId: String) async -> [AppleCareCoverage] {
         guard let assertion = clientAssertion else {
             await MainActor.run { errorMessage = "Connect to ABM first" }
-            return nil
+            return []
         }
-        
+
         do {
             let token = try await apiService.getAccessToken(
                 clientAssertion: assertion,
                 clientId: clientId
             )
-            
-            let coverage = try await apiService.getAppleCareCoverage(deviceId: deviceId, accessToken: token)
-            print("ViewModel: AppleCare coverage retrieved successfully")
-            return coverage
+
+            let coverages = try await apiService.getAppleCareCoverage(deviceId: deviceId, accessToken: token)
+            print("ViewModel: AppleCare coverage retrieved successfully (\(coverages.count) entries)")
+            return coverages
         } catch {
             print("ViewModel: AppleCare error - \(error.localizedDescription)")
             await MainActor.run { errorMessage = error.localizedDescription }
-            return nil
+            return []
         }
     }
     
@@ -125,10 +125,12 @@ extension ABMViewModel {
             await MainActor.run {
                 statusMessage = "Successfully \(action) \(deviceCount) device\(deviceCount == 1 ? "" : "s"). Activity ID: \(activityId)"
                 lastActivityId = activityId
+                logActivity(.assignment, title: "Devices \(action.capitalized)", detail: "\(deviceCount) device\(deviceCount == 1 ? "" : "s") \(action). Activity ID: \(activityId)")
             }
         } catch {
             await MainActor.run {
                 errorMessage = "Assignment failed: \(error.localizedDescription)"
+                logActivity(.assignment, title: "Assignment Failed", detail: error.localizedDescription)
             }
         }
         

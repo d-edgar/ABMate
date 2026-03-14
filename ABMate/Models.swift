@@ -7,11 +7,70 @@
 
 import Foundation
 
+// MARK: - Toast Alert
+struct ToastAlert: Identifiable, Equatable {
+    let id = UUID()
+    let message: String
+    let type: ToastType
+
+    enum ToastType: Equatable {
+        case success
+        case error
+        case info
+    }
+
+    static func == (lhs: ToastAlert, rhs: ToastAlert) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
 // API Credentials
 struct APICredentials: Codable {
     let clientId: String
     let keyId: String
     let privateKey: String
+}
+
+// Connection Profile for saving/switching between ABM connections
+// Note: privateKey is stored in Keychain, not in UserDefaults with the rest of the profile.
+struct ConnectionProfile: Codable, Identifiable, Hashable {
+    let id: UUID
+    var name: String
+    var clientId: String
+    var keyId: String
+    var privateKey: String
+
+    // Only encode metadata to UserDefaults — privateKey goes to Keychain
+    enum CodingKeys: String, CodingKey {
+        case id, name, clientId, keyId
+    }
+
+    init(id: UUID = UUID(), name: String, clientId: String, keyId: String, privateKey: String) {
+        self.id = id
+        self.name = name
+        self.clientId = clientId
+        self.keyId = keyId
+        self.privateKey = privateKey
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        clientId = try container.decode(String.self, forKey: .clientId)
+        keyId = try container.decode(String.self, forKey: .keyId)
+        // Private key will be loaded from Keychain after decoding
+        privateKey = ""
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(clientId, forKey: .clientId)
+        try container.encode(keyId, forKey: .keyId)
+        // privateKey is intentionally NOT encoded — it's stored in Keychain
+    }
 }
 
 // Token Response
@@ -65,6 +124,50 @@ struct OrgDevice: Codable, Identifiable, Hashable {
     var osVersion: String? { nil } // Not provided by ABM API
     var enrollmentState: String? { attributes.status }
     var productType: String? { attributes.productType }
+    var addedDate: String? { attributes.addedToOrgDateTime }
+    var updatedDate: String? { attributes.updatedDateTime }
+    var capacity: String? { attributes.deviceCapacity }
+    var color: String? { attributes.color }
+    var orderNumber: String? { attributes.orderNumber }
+
+    // Sortable non-optional accessors (for Table column sorting)
+    var sortableModel: String { model ?? "" }
+    var sortableOS: String { os ?? "" }
+    var sortableStatus: String { enrollmentState ?? "" }
+    var sortableAddedDate: String { attributes.addedToOrgDateTime ?? "" }
+    var sortableUpdatedDate: String { attributes.updatedDateTime ?? "" }
+    var sortableProductType: String { productType ?? "" }
+
+    // Cached formatters — creating these is expensive, so reuse them
+    private static let isoFormatterFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+    private static let displayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .none
+        return f
+    }()
+
+    /// Format an ISO 8601 date string to a short readable date
+    static func formatDate(_ isoString: String?) -> String {
+        guard let isoString = isoString, !isoString.isEmpty else { return "—" }
+        if let date = isoFormatterFractional.date(from: isoString) {
+            return displayFormatter.string(from: date)
+        }
+        if let date = isoFormatter.date(from: isoString) {
+            return displayFormatter.string(from: date)
+        }
+        // Last resort: just show the first 10 chars (date portion)
+        return String(isoString.prefix(10))
+    }
 }
 
 // Device Response
@@ -149,47 +252,294 @@ struct ActivityStatusResponse: Codable {
 }
 
 
-// AppleCare Coverage Response
+// AppleCare Coverage Response — API returns data as an array
 struct AppleCareCoverageResponse: Codable {
-    let data: AppleCareCoverage
+    let data: [AppleCareCoverage]
 }
 
-struct AppleCareCoverage: Codable, Hashable {
+struct AppleCareCoverage: Codable, Hashable, Identifiable {
     let id: String
     let type: String
     let attributes: AppleCareAttributes
-    
+
     struct AppleCareAttributes: Codable, Hashable {
-        // All fields are optional since API might not return all of them
-        let serialNumber: String?
-        let coverageStatus: String?
-        let coverageEndDate: String?
-        let purchaseDate: String?
-        let registrationDate: String?
-        let warrantyStatus: String?
-        let repairCoverage: String?
-        let technicalSupportCoverage: String?
-        let appleCarePlanType: String?
-        let deviceId: String?
-        let hardwareType: String?
-        let estimatedPurchaseDate: String?
-        let coverageType: String?
-        
-        // Handle different key naming conventions from API
-        enum CodingKeys: String, CodingKey {
-            case serialNumber
-            case coverageStatus
-            case coverageEndDate
-            case purchaseDate
-            case registrationDate
-            case warrantyStatus
-            case repairCoverage
-            case technicalSupportCoverage
-            case appleCarePlanType
-            case deviceId
-            case hardwareType
-            case estimatedPurchaseDate
-            case coverageType
+        // Fields matching the actual Apple Business/School Manager API response
+        let status: String?
+        let description: String?
+        let startDateTime: String?
+        let endDateTime: String?
+        let contractCancelDateTime: String?
+        let agreementNumber: String?
+        let isRenewable: Bool?
+        let isCanceled: Bool?
+        let paymentType: String?
+    }
+}
+
+// MARK: - Jamf Pro Models
+
+/// Jamf Pro connection profile — clientSecret stored in Keychain, rest in UserDefaults
+struct JamfConnectionProfile: Codable, Identifiable, Hashable {
+    let id: UUID
+    var name: String
+    var jamfURL: String
+    var clientId: String
+    var clientSecret: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, jamfURL, clientId
+    }
+
+    init(id: UUID = UUID(), name: String, jamfURL: String, clientId: String, clientSecret: String) {
+        self.id = id
+        self.name = name
+        self.jamfURL = jamfURL
+        self.clientId = clientId
+        self.clientSecret = clientSecret
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        jamfURL = try container.decode(String.self, forKey: .jamfURL)
+        clientId = try container.decode(String.self, forKey: .clientId)
+        clientSecret = "" // loaded from Keychain
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(jamfURL, forKey: .jamfURL)
+        try container.encode(clientId, forKey: .clientId)
+    }
+}
+
+/// Jamf Pro OAuth token response
+struct JamfTokenResponse: Codable {
+    let accessToken: String
+    let expiresIn: Int
+    let tokenType: String
+
+    enum CodingKeys: String, CodingKey {
+        case accessToken = "access_token"
+        case expiresIn = "expires_in"
+        case tokenType = "token_type"
+    }
+}
+
+/// Jamf Pro computer inventory search response
+struct JamfComputerSearchResponse: Codable {
+    let totalCount: Int
+    let results: [JamfComputer]
+}
+
+/// Jamf Pro computer from inventory endpoint
+struct JamfComputer: Codable, Identifiable {
+    let id: String
+    let general: JamfComputerGeneral?
+    let hardware: JamfComputerHardware?
+    let purchasing: JamfPurchasing?
+}
+
+struct JamfComputerGeneral: Codable {
+    let name: String?
+    let managementId: String?
+}
+
+struct JamfComputerHardware: Codable {
+    let serialNumber: String?
+    let model: String?
+    let modelIdentifier: String?
+}
+
+/// Jamf Pro purchasing info — used for both reading and writing
+struct JamfPurchasing: Codable {
+    var purchased: Bool?
+    var leased: Bool?
+    var poNumber: String?
+    var poDate: String?
+    var vendor: String?
+    var warrantyDate: String?
+    var appleCareId: String?
+    var leaseDate: String?
+    var purchasePrice: String?
+    var lifeExpectancy: Int?
+    var purchasingAccount: String?
+    var purchasingContact: String?
+}
+
+/// Wrapper for PATCH /api/v1/computers-inventory-detail/{id}
+struct JamfComputerDetailUpdate: Codable {
+    let purchasing: JamfPurchasing
+}
+
+/// Jamf Pro mobile device search response
+struct JamfMobileDeviceSearchResponse: Codable {
+    let totalCount: Int
+    let results: [JamfMobileDevice]
+}
+
+struct JamfMobileDevice: Codable, Identifiable {
+    let id: String
+    let name: String?
+    let serialNumber: String?
+    let model: String?
+}
+
+/// Jamf mobile device detail (for reading purchasing info)
+struct JamfMobileDeviceDetail: Codable {
+    let id: String
+    let purchasing: JamfPurchasing?
+}
+
+/// Wrapper for PATCH /api/v2/mobile-devices/{id}
+struct JamfMobileDeviceUpdate: Codable {
+    let purchasing: JamfPurchasing
+}
+
+/// Represents a device found in Jamf Pro (computer or mobile)
+enum JamfDeviceType: String {
+    case computer = "Computer"
+    case mobileDevice = "Mobile Device"
+}
+
+struct JamfDeviceMatch {
+    let id: String
+    let name: String
+    let serial: String
+    let model: String
+    let deviceType: JamfDeviceType
+    let currentPurchasing: JamfPurchasing?
+}
+
+/// Lightweight device record for bulk comparison
+struct JamfBulkDevice {
+    let id: String
+    let name: String
+    let serial: String
+    let model: String
+    let deviceType: JamfDeviceType
+    var currentPONumber: String?
+    var currentVendor: String?
+    var currentWarrantyDate: String?
+    var currentAppleCareId: String?
+}
+
+/// Entry in the bulk sync log
+struct BulkSyncLogEntry: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let serial: String
+    let message: String
+    let level: LogLevel
+
+    enum LogLevel {
+        case info, success, warning, error
+    }
+}
+
+/// Summary of a bulk sync run
+struct BulkSyncSummary {
+    var jamfComputerCount: Int = 0
+    var jamfMobileCount: Int = 0
+    var asmDeviceCount: Int = 0
+    var matchedCount: Int = 0
+    var notInJamfCount: Int = 0
+    var skippedNoChangeCount: Int = 0
+    var pushSuccessCount: Int = 0
+    var pushFailCount: Int = 0
+    var failedSerials: [String] = []
+    var startTime: Date = Date()
+    var endTime: Date?
+}
+
+/// Represents what we want to sync from ASM to Jamf
+struct SyncPayload {
+    let poNumber: String
+    let warrantyDate: String
+    let appleCareId: String
+    let purchasePrice: String
+    let vendor: String
+    let purchasingAccount: String
+    let purchasingContact: String
+    let leaseDate: String
+    let lifeExpectancy: Int
+    let purchased: Bool
+    let leased: Bool
+    let poDate: String
+
+    /// Convert to Jamf purchasing object
+    func toJamfPurchasing() -> JamfPurchasing {
+        JamfPurchasing(
+            purchased: purchased,
+            leased: leased,
+            poNumber: poNumber.isEmpty ? nil : poNumber,
+            poDate: poDate.isEmpty ? nil : poDate,
+            vendor: vendor.isEmpty ? nil : vendor,
+            warrantyDate: warrantyDate.isEmpty ? nil : warrantyDate,
+            appleCareId: appleCareId.isEmpty ? nil : appleCareId,
+            leaseDate: leaseDate.isEmpty ? nil : leaseDate,
+            purchasePrice: purchasePrice.isEmpty ? nil : purchasePrice,
+            lifeExpectancy: lifeExpectancy,
+            purchasingAccount: purchasingAccount.isEmpty ? nil : purchasingAccount,
+            purchasingContact: purchasingContact.isEmpty ? nil : purchasingContact
+        )
+    }
+}
+
+// MARK: - Activity History
+
+struct ActivityEntry: Identifiable, Codable {
+    let id: UUID
+    let timestamp: Date
+    let category: ActivityCategory
+    let title: String
+    let detail: String
+    let icon: String
+
+    init(category: ActivityCategory, title: String, detail: String = "", icon: String? = nil) {
+        self.id = UUID()
+        self.timestamp = Date()
+        self.category = category
+        self.title = title
+        self.detail = detail
+        self.icon = icon ?? category.defaultIcon
+    }
+
+    /// Restore from persisted data (preserves original id and timestamp)
+    init(id: UUID, timestamp: Date, category: ActivityCategory, title: String, detail: String = "", icon: String? = nil) {
+        self.id = id
+        self.timestamp = timestamp
+        self.category = category
+        self.title = title
+        self.detail = detail
+        self.icon = icon ?? category.defaultIcon
+    }
+
+    enum ActivityCategory: String, Codable, CaseIterable {
+        case connection = "Connection"
+        case sync = "Sync"
+        case assignment = "Assignment"
+        case export = "Export"
+
+        var defaultIcon: String {
+            switch self {
+            case .connection: return "link"
+            case .sync: return "arrow.triangle.2.circlepath"
+            case .assignment: return "arrow.right.circle"
+            case .export: return "square.and.arrow.up"
+            }
+        }
+
+        var color: String {
+            switch self {
+            case .connection: return "purple"
+            case .sync: return "orange"
+            case .assignment: return "blue"
+            case .export: return "green"
+            }
         }
     }
 }

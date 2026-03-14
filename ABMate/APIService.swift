@@ -130,21 +130,23 @@ class APIService {
     }
     
     // Get AppleCare Coverage for a device
-    func getAppleCareCoverage(deviceId: String, accessToken: String) async throws -> AppleCareCoverage {
+    // API returns an array of coverage entries (e.g. AppleCare + Limited Warranty)
+    func getAppleCareCoverage(deviceId: String, accessToken: String) async throws -> [AppleCareCoverage] {
         let url = URL(string: "\(apiBaseURL)/v1/orgDevices/\(deviceId)/appleCareCoverage")!
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        
+
         let (data, response) = try await URLSession.shared.data(for: request)
-        
-        // Always print raw response for debugging
+
+        // Debug logging
         let responseString = String(data: data, encoding: .utf8) ?? "No data"
-        print("AppleCare Raw Response: \(responseString)")
-        
+        print("AppleCare Raw Response for \(deviceId): \(responseString)")
+        print("AppleCare URL: \(url.absoluteString)")
+
         if let httpResponse = response as? HTTPURLResponse {
             print("AppleCare Status Code: \(httpResponse.statusCode)")
-            
+
             if httpResponse.statusCode != 200 {
                 let errorMessage: String
                 switch httpResponse.statusCode {
@@ -153,18 +155,25 @@ class APIService {
                 default:
                     errorMessage = "AppleCare API returned status \(httpResponse.statusCode)"
                 }
-                
+
                 throw NSError(domain: "API", code: httpResponse.statusCode,
                             userInfo: [NSLocalizedDescriptionKey: errorMessage])
             }
         }
-        
+
         do {
             let coverageResponse = try JSONDecoder().decode(AppleCareCoverageResponse.self, from: data)
-            print("AppleCare decoded successfully: \(coverageResponse.data.attributes.coverageStatus ?? "nil")")
+            print("AppleCare decoded successfully: \(coverageResponse.data.count) coverage entries")
             return coverageResponse.data
         } catch {
             print("AppleCare JSON decode error: \(error)")
+            // Log the actual structure for debugging
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let dataArray = json["data"] as? [[String: Any]],
+               let first = dataArray.first,
+               let attrs = first["attributes"] as? [String: Any] {
+                print("AppleCare API attribute keys: \(attrs.keys.sorted())")
+            }
             throw error
         }
     }
