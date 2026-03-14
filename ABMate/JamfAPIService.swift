@@ -233,19 +233,19 @@ class JamfAPIService {
 
     /// Update purchasing info for a mobile device
     func updateMobileDevicePurchasing(id: String, purchasing: JamfPurchasing, token: String) async throws {
-        // The Jamf Pro v2 mobile device endpoint does NOT support purchasing fields.
-        // We must use the Classic API (XML) to update mobile device purchasing data.
-        guard let url = URL(string: "\(baseURL)/JSSResource/mobiledevices/id/\(id)") else {
+        // Strategy: Go straight to Classic XML API which is the only proven working endpoint.
+        // v2/v1 JSON endpoints consistently fail (405/400/404) for mobile purchasing updates.
+
+        guard let classicURL = URL(string: "\(baseURL)/JSSResource/mobiledevices/id/\(id)") else {
             throw JamfAPIError.invalidURL
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "PUT"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/xml", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/xml", forHTTPHeaderField: "Accept")
+        var classicRequest = URLRequest(url: classicURL)
+        classicRequest.httpMethod = "PUT"
+        classicRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        classicRequest.setValue("application/xml", forHTTPHeaderField: "Content-Type")
+        classicRequest.setValue("application/xml", forHTTPHeaderField: "Accept")
 
-        // Build XML payload for Classic API
         var xml = "<mobile_device><purchasing>"
         xml += "<is_purchased>\((purchasing.purchased ?? false) ? "true" : "false")</is_purchased>"
         xml += "<is_leased>\((purchasing.leased ?? false) ? "true" : "false")</is_leased>"
@@ -261,17 +261,15 @@ class JamfAPIService {
         if let contact = purchasing.purchasingContact { xml += "<purchasing_contact>\(escapeXML(contact))</purchasing_contact>" }
         xml += "</purchasing></mobile_device>"
 
-        request.httpBody = xml.data(using: .utf8)
+        classicRequest.httpBody = xml.data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, resp) = try await URLSession.shared.data(for: classicRequest)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
 
-        if let httpResponse = response as? HTTPURLResponse {
-            print("Jamf Mobile Update (\(id)): HTTP \(httpResponse.statusCode)")
-            if httpResponse.statusCode != 200 && httpResponse.statusCode != 201 {
-                let body = String(data: data, encoding: .utf8) ?? ""
-                throw JamfAPIError.apiError(httpResponse.statusCode, body)
-            }
-        }
+        if status == 200 || status == 201 { return }
+
+        let body = String(data: data, encoding: .utf8) ?? ""
+        throw JamfAPIError.apiError(status, "Classic mobile update failed. HTTP \(status): \(body.prefix(500))")
     }
 
     /// Escape special characters for XML values
@@ -365,7 +363,9 @@ class JamfAPIService {
                         model: computer.hardware?.model ?? "Unknown",
                         deviceType: .computer,
                         currentPONumber: computer.purchasing?.poNumber,
-                        currentVendor: computer.purchasing?.vendor
+                        currentVendor: computer.purchasing?.vendor,
+                        currentWarrantyDate: computer.purchasing?.warrantyDate,
+                        currentAppleCareId: computer.purchasing?.appleCareId
                     )
                 }
             }
@@ -421,6 +421,110 @@ class JamfAPIService {
 
         print("Jamf bulk fetch: \(result.count) mobile devices")
         return result
+    }
+
+    /// Fetch purchasing data for mobile devices via Classic API (v2 list doesn't include purchasing).
+    /// Updates the provided dict in-place with purchasing fields. Uses concurrent requests for speed.
+    func fetchMobilePurchasingData(
+        devices: inout [String: JamfBulkDevice],
+        token: String,
+        onProgress: @Sendable (Int, Int) -> Void = { _, _ in }
+    ) async {
+        let mobileDevices = devices.filter { $0.value.deviceType == .mobileDevice }
+        let total = mobileDevices.count
+        guard total > 0 else { return }
+
+        // Capture baseURL locally to avoid capturing non-Sendable self in addTask closures
+        let capturedBaseURL = self.baseURL
+
+        // Fetch in batches of 10 concurrent requests
+        let batchSize = 10
+        let entries = Array(mobileDevices)
+        var fetched = 0
+
+        for batchStart in stride(from: 0, to: entries.count, by: batchSize) {
+            let batchEnd = min(batchStart + batchSize, entries.count)
+            let batch = entries[batchStart..<batchEnd]
+
+            await withTaskGroup(of: (String, JamfPurchasing?).self) { group in
+                for (serial, device) in batch {
+                    group.addTask {
+                        do {
+                            guard let url = URL(string: "\(capturedBaseURL)/JSSResource/mobiledevices/id/\(device.id)/subset/Purchasing") else {
+                                return (serial, nil)
+                            }
+                            var request = URLRequest(url: url)
+                            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                            request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+                            let (data, response) = try await URLSession.shared.data(for: request)
+                            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                            guard status == 200 else { return (serial, nil) }
+
+                            // Classic API with Accept: application/json returns JSON
+                            struct ClassicMobileResponse: Codable {
+                                let mobile_device: ClassicMobileDevice?
+                                struct ClassicMobileDevice: Codable {
+                                    let purchasing: ClassicPurchasing?
+                                }
+                                struct ClassicPurchasing: Codable {
+                                    let is_purchased: Bool?
+                                    let is_leased: Bool?
+                                    let po_number: String?
+                                    let vendor: String?
+                                    let purchase_price: String?
+                                    let purchasing_account: String?
+                                    let purchasing_contact: String?
+                                    let po_date: String?
+                                    let po_date_epoch: Int?
+                                    let po_date_utc: String?
+                                    let warranty_expires: String?
+                                    let warranty_expires_epoch: Int?
+                                    let warranty_expires_utc: String?
+                                    let applecare_id: String?
+                                    let lease_expires: String?
+                                    let life_expectancy: Int?
+                                }
+                            }
+
+                            let decoded = try JSONDecoder().decode(ClassicMobileResponse.self, from: data)
+                            if let p = decoded.mobile_device?.purchasing {
+                                let purchasing = JamfPurchasing(
+                                    purchased: p.is_purchased,
+                                    leased: p.is_leased,
+                                    poNumber: p.po_number,
+                                    poDate: p.po_date,
+                                    vendor: p.vendor,
+                                    warrantyDate: p.warranty_expires,
+                                    appleCareId: p.applecare_id,
+                                    leaseDate: p.lease_expires,
+                                    purchasePrice: p.purchase_price,
+                                    lifeExpectancy: p.life_expectancy,
+                                    purchasingAccount: p.purchasing_account,
+                                    purchasingContact: p.purchasing_contact
+                                )
+                                return (serial, purchasing)
+                            }
+                            return (serial, nil)
+                        } catch {
+                            return (serial, nil)
+                        }
+                    }
+                }
+
+                for await (serial, purchasing) in group {
+                    if let purchasing = purchasing {
+                        devices[serial]?.currentPONumber = purchasing.poNumber
+                        devices[serial]?.currentVendor = purchasing.vendor
+                        devices[serial]?.currentWarrantyDate = purchasing.warrantyDate
+                        devices[serial]?.currentAppleCareId = purchasing.appleCareId
+                    }
+                    fetched += 1
+                }
+            }
+
+            onProgress(fetched, total)
+        }
     }
 
     /// Fetch ALL Jamf devices (computers + mobile) into a single serial → device dict.

@@ -13,6 +13,117 @@ class ABMViewModel: ObservableObject {
     // MARK: - Toast Alerts
     @Published var activeToast: ToastAlert?
 
+    // MARK: - Activity History
+    @Published var activityHistory: [ActivityEntry] = []
+
+    func logActivity(_ category: ActivityEntry.ActivityCategory, title: String, detail: String = "") {
+        let entry = ActivityEntry(category: category, title: title, detail: detail)
+        activityHistory.insert(entry, at: 0) // newest first
+        // Keep last 200 entries
+        if activityHistory.count > 200 {
+            activityHistory = Array(activityHistory.prefix(200))
+        }
+        // Persist the sanitized audit trail
+        persistActivityHistory()
+    }
+
+    // MARK: - Activity Persistence (sanitized audit trail)
+
+    /// File URL for the persisted activity log — stored in Application Support
+    private static var activityLogURL: URL? {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let dir = appSupport.appendingPathComponent("ABMate", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("activity_log.json")
+    }
+
+    /// Strip sensitive specifics from detail strings before writing to disk.
+    /// Keeps the "what" and "when" but not the "how much" or "where".
+    private func sanitizeDetail(_ detail: String, category: ActivityEntry.ActivityCategory) -> String {
+        switch category {
+        case .connection:
+            // Strip URLs, device counts — just note that a connection happened
+            if detail.lowercased().contains("failed") { return "Connection attempt failed" }
+            return "Connected successfully"
+        case .sync:
+            // Strip exact counts but keep the outcome description
+            if detail.lowercased().contains("failed") && detail.lowercased().contains("succeeded") {
+                // "X succeeded, Y failed" → just the outcome
+                return "Sync completed"
+            }
+            if detail.lowercased().contains("matched") {
+                return "Inventory comparison completed"
+            }
+            return "Sync action performed"
+        case .assignment:
+            // Strip device counts and activity IDs
+            if detail.lowercased().contains("failed") { return "Assignment failed" }
+            return "Device assignment completed"
+        case .export:
+            // Strip filenames — just note that an export happened
+            return "Data exported"
+        }
+    }
+
+    private func persistActivityHistory() {
+        guard let url = Self.activityLogURL else { return }
+        // Build sanitized entries for disk
+        struct SafeEntry: Codable {
+            let id: UUID
+            let timestamp: Date
+            let category: String
+            let title: String
+            let detail: String  // sanitized
+        }
+        let safeEntries = activityHistory.prefix(200).map { entry in
+            SafeEntry(
+                id: entry.id,
+                timestamp: entry.timestamp,
+                category: entry.category.rawValue,
+                title: entry.title,
+                detail: sanitizeDetail(entry.detail, category: entry.category)
+            )
+        }
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(safeEntries)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            print("Failed to persist activity log: \(error)")
+        }
+    }
+
+    func loadActivityHistory() {
+        guard let url = Self.activityLogURL,
+              FileManager.default.fileExists(atPath: url.path) else { return }
+        struct SafeEntry: Codable {
+            let id: UUID
+            let timestamp: Date
+            let category: String
+            let title: String
+            let detail: String
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let safeEntries = try decoder.decode([SafeEntry].self, from: data)
+            activityHistory = safeEntries.compactMap { safe in
+                guard let cat = ActivityEntry.ActivityCategory(rawValue: safe.category) else { return nil }
+                return ActivityEntry(
+                    id: safe.id,
+                    timestamp: safe.timestamp,
+                    category: cat,
+                    title: safe.title,
+                    detail: safe.detail
+                )
+            }
+        } catch {
+            print("Failed to load activity log: \(error)")
+        }
+    }
+
     @Published var devices: [OrgDevice] = []
     @Published var mdmServers: [MDMServer] = []
     @Published var activityStatus: ActivityStatusResponse?
@@ -53,9 +164,9 @@ class ABMViewModel: ObservableObject {
     /// Jamf devices found during last comparison (serial → device)
     var lastJamfDeviceMap: [String: JamfBulkDevice] = [:]
     /// ASM serials that matched a Jamf device and have data differences
-    var matchedSerials: Set<String> = []
+    @Published var matchedSerials: Set<String> = []
     /// ASM serials that matched but data was already the same
-    var skippedSerials: Set<String> = []
+    @Published var skippedSerials: Set<String> = []
     /// Currently running sync task (for cancellation)
     var bulkSyncTask: Task<Void, Never>?
 
@@ -174,6 +285,7 @@ class ABMViewModel: ObservableObject {
 
                     statusMessage = "Connected to ABM. Fetched \(devices.count) devices and \(mdmServers.count) servers."
                     showToast("\(connectionLabel) connected — \(devices.count) devices loaded", type: .success)
+                    logActivity(.connection, title: "ASM Connected", detail: "\(devices.count) devices, \(mdmServers.count) MDM servers loaded")
                     lastError = nil
                     break
                 } catch let error as NSError where error.domain == NSURLErrorDomain && error.code == -1005 {
@@ -211,6 +323,7 @@ class ABMViewModel: ObservableObject {
         keyId = UserDefaults.standard.string(forKey: "keyId") ?? ""
         loadProfiles()
         loadJamfProfiles()
+        loadActivityHistory()
     }
 
     // MARK: - Connection Profiles
@@ -372,6 +485,7 @@ class ABMViewModel: ObservableObject {
 
                     statusMessage = "Connected to ABM. Fetched \(devices.count) devices and \(mdmServers.count) servers."
                     showToast("\(connectionLabel) connected — \(devices.count) devices loaded", type: .success)
+                    logActivity(.connection, title: "ASM Reconnected", detail: "\(devices.count) devices refreshed")
                     lastError = nil
                     break
                 } catch let error as NSError where error.domain == NSURLErrorDomain && error.code == -1005 {
@@ -440,10 +554,12 @@ class ABMViewModel: ObservableObject {
                 isJamfConnected = true
                 jamfStatusMessage = "Connected to Jamf Pro"
                 showToast("MDM connected", type: .success)
+                logActivity(.connection, title: "MDM Connected", detail: "Jamf Pro at \(jamfURL)")
             } catch {
                 isJamfConnected = false
                 jamfErrorMessage = error.localizedDescription
                 showToast("MDM connection failed", type: .error)
+                logActivity(.connection, title: "MDM Connection Failed", detail: error.localizedDescription)
             }
             isJamfLoading = false
         }
@@ -588,6 +704,25 @@ class ABMViewModel: ObservableObject {
                 // Merge into one map
                 var allJamf = computers
                 allJamf.merge(mobiles) { existing, _ in existing }
+
+                // Fetch purchasing data for mobile devices via Classic API
+                // (v2 list endpoint doesn't return purchasing fields)
+                if !mobiles.isEmpty {
+                    addLog("Fetching purchasing data for \(mobiles.count) mobile devices...", level: .info)
+                    await jamfAPIService.fetchMobilePurchasingData(
+                        devices: &allJamf,
+                        token: token
+                    ) { fetched, total in
+                        // Progress is reported from background tasks — just print
+                        if fetched % 50 == 0 || fetched == total {
+                            print("Mobile purchasing fetch: \(fetched)/\(total)")
+                        }
+                    }
+                    addLog("Mobile purchasing data fetched.", level: .info)
+                }
+
+                guard !Task.isCancelled else { handleCancellation(); return }
+
                 lastJamfDeviceMap = allJamf
 
                 // Compare against ASM — check for actual data differences
@@ -603,16 +738,24 @@ class ABMViewModel: ObservableObject {
                         let asmPO = (device.orderNumber ?? "").trimmingCharacters(in: .whitespaces)
                         let jamfPO = (jamfDevice.currentPONumber ?? "").trimmingCharacters(in: .whitespaces)
                         let jamfVendor = (jamfDevice.currentVendor ?? "").trimmingCharacters(in: .whitespaces)
+                        let jamfWarranty = (jamfDevice.currentWarrantyDate ?? "").trimmingCharacters(in: .whitespaces)
+                        let jamfAppleCare = (jamfDevice.currentAppleCareId ?? "").trimmingCharacters(in: .whitespaces)
 
-                        // Check if data actually differs
+                        // Check if core data differs
                         let poMatches = asmPO == jamfPO || (asmPO.isEmpty && jamfPO.isEmpty)
                         let vendorMatches = jamfVendor.lowercased() == "apple" || jamfVendor.isEmpty
 
-                        if poMatches && vendorMatches {
-                            noChange.insert(serial)
-                        } else {
+                        // Warranty/AppleCare: if Jamf has no warranty data, flag for sync
+                        let warrantyPopulated = !jamfWarranty.isEmpty
+                        let appleCarePopulated = !jamfAppleCare.isEmpty
+                        let warrantyLikelyComplete = warrantyPopulated || appleCarePopulated
+
+                        if !poMatches || !vendorMatches || !warrantyLikelyComplete {
                             needsSync.insert(serial)
+                        } else {
+                            noChange.insert(serial)
                         }
+
                     } else {
                         notFound.insert(serial)
                     }
@@ -628,6 +771,7 @@ class ABMViewModel: ObservableObject {
                 addLog("Comparison complete.", level: .success)
                 addLog("\(needsSync.count + noChange.count) devices found in both \(connectionLabel) and MDM.", level: .success)
                 addLog("\(needsSync.count) devices have data differences and need syncing.", level: needsSync.isEmpty ? .info : .success)
+                logActivity(.sync, title: "Inventory Comparison", detail: "\(needsSync.count + noChange.count) matched, \(needsSync.count) need sync, \(noChange.count) up to date, \(notFound.count) not in MDM")
 
                 if !noChange.isEmpty {
                     addLog("\(noChange.count) devices already up to date — will be skipped.", level: .info)
@@ -649,13 +793,29 @@ class ABMViewModel: ObservableObject {
 
     /// Phase 2: Push purchasing data from ASM to Jamf for matched devices with differences.
     /// Refreshes token proactively every 50 devices to avoid 401 expiry.
-    func bulkSyncPush(serialsToSync: Set<String>? = nil) {
+    func bulkSyncPush(serialsToSync: Set<String>? = nil, maxDevices: Int? = nil, computersOnly: Bool = false, mobileOnly: Bool = false) {
         guard bulkSyncPhase == .compared || bulkSyncPhase == .done else { return }
         bulkSyncPhase = .syncing
         bulkSyncCancelled = false
 
         let targetSerials = serialsToSync ?? matchedSerials
-        addLog("Starting bulk purchasing sync for \(targetSerials.count) devices...", level: .info)
+        let limit = maxDevices ?? targetSerials.count
+
+        // Diagnostic: count device types in the target set
+        if computersOnly || mobileOnly {
+            let typeLabel = computersOnly ? "computers" : "mobile devices"
+            var typeCount = 0
+            for d in devices {
+                let s = d.serialNumber.uppercased()
+                if targetSerials.contains(s), let j = lastJamfDeviceMap[s] {
+                    if computersOnly && j.deviceType == .computer { typeCount += 1 }
+                    if mobileOnly && j.deviceType == .mobileDevice { typeCount += 1 }
+                }
+            }
+            addLog("Found \(typeCount) \(typeLabel) in the \(targetSerials.count) devices that need sync. Will process up to \(limit).", level: .info)
+        }
+
+        addLog("Starting bulk purchasing sync for \(min(limit, targetSerials.count)) devices\(maxDevices != nil ? " (test mode)" : "")...", level: .info)
         bulkSyncSummary?.pushSuccessCount = 0
         bulkSyncSummary?.pushFailCount = 0
         bulkSyncSummary?.failedSerials = []
@@ -675,6 +835,13 @@ class ABMViewModel: ObservableObject {
                 let serial = device.serialNumber.uppercased()
                 guard targetSerials.contains(serial), let jamfDevice = lastJamfDeviceMap[serial] else { continue }
 
+                // Filter by device type if requested
+                if computersOnly && jamfDevice.deviceType != .computer { continue }
+                if mobileOnly && jamfDevice.deviceType != .mobileDevice { continue }
+
+                // Stop early if we've hit the test limit
+                if processed >= limit { break }
+
                 processed += 1
                 bulkSyncProgress = "Syncing \(processed)/\(targetSerials.count): \(serial)"
 
@@ -688,31 +855,97 @@ class ABMViewModel: ObservableObject {
                 }
 
                 // Fetch AppleCare coverage from ASM for this device
+                // Call the API service directly to avoid polluting errorMessage during bulk
+                // Retries once on transient network errors
                 var warrantyEndDate: String?
                 var appleCareAgreement: String?
 
-                let coverages = await getAppleCareCoverage(deviceId: device.id)
-                if !coverages.isEmpty {
-                    // Find the AppleCare+ entry (longest coverage), fall back to Limited Warranty
-                    let appleCare = coverages.first(where: { ($0.attributes.description ?? "").contains("AppleCare") })
-                    let warranty = coverages.first(where: { ($0.attributes.description ?? "").contains("Warranty") })
-                    let best = appleCare ?? warranty
+                addLog("\(serial): Looking up coverage for ASM device ID: \(device.id)", level: .info, serial: serial)
 
-                    if let endDate = best?.attributes.endDateTime {
-                        // Convert ISO date to Jamf-friendly format (yyyy-MM-dd)
-                        warrantyEndDate = String(endDate.prefix(10))
+                if let assertion = clientAssertion {
+                    for attempt in 1...2 {
+                        do {
+                            let asmToken = try await apiService.getAccessToken(
+                                clientAssertion: assertion,
+                                clientId: clientId
+                            )
+                            let coverages = try await apiService.getAppleCareCoverage(
+                                deviceId: device.id,
+                                accessToken: asmToken
+                            )
+                            addLog("\(serial): AppleCare API returned \(coverages.count) coverage entries", level: .info, serial: serial)
+
+                            if !coverages.isEmpty {
+                                // Check for active coverages first
+                                let activeCoverages = coverages.filter { $0.attributes.status == "ACTIVE" }
+                                let expiredCoverages = coverages.filter { $0.attributes.status != "ACTIVE" }
+
+                                if !activeCoverages.isEmpty {
+                                    let appleCare = activeCoverages.first(where: { ($0.attributes.description ?? "").contains("AppleCare") })
+                                    let latestCoverage = activeCoverages.max(by: {
+                                        ($0.attributes.endDateTime ?? "") < ($1.attributes.endDateTime ?? "")
+                                    })
+
+                                    if let agreement = appleCare?.attributes.agreementNumber, !agreement.isEmpty {
+                                        appleCareAgreement = agreement
+                                    }
+                                    if let best = latestCoverage, let endDate = best.attributes.endDateTime {
+                                        warrantyEndDate = String(endDate.prefix(10))
+                                    }
+                                    addLog("\(serial): Warranty=\(warrantyEndDate ?? "none"), AppleCareID=\(appleCareAgreement ?? "none")", level: .info, serial: serial)
+                                } else if !expiredCoverages.isEmpty {
+                                    // All coverage is expired — keep nil for Jamf (no valid date to send)
+                                    addLog("\(serial): All coverage expired — skipping warranty fields", level: .info, serial: serial)
+                                }
+                            } else {
+                                // No coverage data returned
+                                addLog("\(serial): No coverage entries — warranty fields will be empty", level: .info, serial: serial)
+                            }
+                            break // Success, stop retrying
+                        } catch let error as NSError where error.domain == NSURLErrorDomain && attempt == 1 {
+                            // Transient network error — retry once after brief pause
+                            try? await Task.sleep(nanoseconds: 1_000_000_000)
+                            continue
+                        } catch {
+                            // Coverage lookup failed (404 = no coverage, or other error)
+                            addLog("\(serial): AppleCare lookup failed — \(error.localizedDescription)", level: .warning, serial: serial)
+                            break
+                        }
                     }
-                    if let agreement = appleCare?.attributes.agreementNumber {
-                        appleCareAgreement = agreement
-                    }
+                } else {
+                    addLog("\(serial): No ASM assertion available — skipping AppleCare lookup", level: .warning, serial: serial)
                 }
 
                 // Build purchasing data from ASM + AppleCare
+                // Use the "Added to Org" date as the PO date
+                let poDate: String? = {
+                    if let added = device.addedDate, !added.isEmpty {
+                        return String(added.prefix(10)) // yyyy-MM-dd
+                    }
+                    return nil
+                }()
+
+                // If no warranty date found and we have a PO date, calculate PO date + 4 years
+                if warrantyEndDate == nil, let poDateStr = poDate {
+                    let df = DateFormatter()
+                    df.dateFormat = "yyyy-MM-dd"
+                    if let date = df.date(from: poDateStr),
+                       let fourYearsLater = Calendar.current.date(byAdding: .year, value: 4, to: date) {
+                        warrantyEndDate = df.string(from: fourYearsLater)
+                        addLog("\(serial): No warranty data — set to PO date + 4 years (\(warrantyEndDate!))", level: .info, serial: serial)
+                    }
+                }
+
+                // Sanitize appleCareId — don't send non-ID values like "expired"
+                if let acid = appleCareAgreement, acid.lowercased() == "expired" {
+                    appleCareAgreement = nil
+                }
+
                 let purchasing = JamfPurchasing(
                     purchased: true,
                     leased: false,
                     poNumber: device.orderNumber,
-                    poDate: nil,
+                    poDate: poDate,
                     vendor: "Apple",
                     warrantyDate: warrantyEndDate,
                     appleCareId: appleCareAgreement,
@@ -734,23 +967,39 @@ class ABMViewModel: ObservableObject {
                         deviceType: jamfDevice.deviceType,
                         currentPurchasing: nil
                     )
+                    let typeLabel = jamfDevice.deviceType == .mobileDevice ? "mobile" : "computer"
+                    addLog("\(serial): Pushing \(typeLabel) (Jamf ID: \(jamfDevice.id))...", level: .info, serial: serial)
                     try await jamfAPIService.updateDevicePurchasing(
                         match: match,
                         purchasing: purchasing,
                         token: token
                     )
                     bulkSyncSummary?.pushSuccessCount += 1
-                    addLog("\(serial): Updated successfully", level: .success, serial: serial)
+                    addLog("\(serial): \(typeLabel.capitalized) updated successfully", level: .success, serial: serial)
+
+                    // Update cached Jamf data so re-comparison sees this device as up to date
+                    if var cached = lastJamfDeviceMap[serial] {
+                        cached.currentPONumber = purchasing.poNumber
+                        cached.currentVendor = purchasing.vendor
+                        cached.currentWarrantyDate = purchasing.warrantyDate
+                        cached.currentAppleCareId = purchasing.appleCareId
+                        lastJamfDeviceMap[serial] = cached
+                    }
+
+                    // Move from needsSync to skipped (up to date)
+                    matchedSerials.remove(serial)
+                    skippedSerials.insert(serial)
                 } catch {
                     bulkSyncSummary?.pushFailCount += 1
                     bulkSyncSummary?.failedSerials.append(serial)
-                    addLog("\(serial): Push failed — \(error.localizedDescription)", level: .error, serial: serial)
+                    addLog("\(serial): Push failed — \(error)", level: .error, serial: serial)
                 }
             }
 
             let successCount = bulkSyncSummary?.pushSuccessCount ?? 0
             let failCount = bulkSyncSummary?.pushFailCount ?? 0
             addLog("Bulk sync complete. \(successCount) succeeded, \(failCount) failed.", level: successCount > 0 ? .success : .warning)
+            logActivity(.sync, title: "Purchasing Sync Complete", detail: "\(successCount) succeeded, \(failCount) failed")
 
             bulkSyncSummary?.endTime = Date()
             bulkSyncPhase = .done
@@ -809,7 +1058,7 @@ class ABMViewModel: ObservableObject {
         report += "\(connectionLabel) Devices:    \(summary.asmDeviceCount)\n"
         report += "Matched (total):    \(summary.matchedCount)\n"
         report += "Data Differences:   \(matchedSerials.count)\n"
-        report += "Already Up to Date: \(summary.skippedNoChangeCount)\n"
+        report += "Already Up to Date: \(skippedSerials.count)\n"
         report += "Not Found in MDM:   \(summary.notInJamfCount)\n\n"
 
         report += "SYNC RESULTS\n"

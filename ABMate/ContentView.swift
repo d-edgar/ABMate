@@ -14,7 +14,7 @@ enum NavigationItem: String, CaseIterable, Identifiable {
     case devices = "Devices"
     case mdmServers = "MDM Servers"
     case assign = "Assign"
-    case mdmSync = "MDM Sync"
+    case mdmSync = "Inventory Sync"
     case activity = "Activity"
 
     var id: String { rawValue }
@@ -226,7 +226,7 @@ struct ContentView: View {
             Group {
                 switch selectedNavItem {
                 case .dashboard:
-                    DashboardView(viewModel: viewModel, onOpenSettings: { settingsInitialTab = .asmAbm; showingSettings = true }, onNavigateToActivity: { selectedNavItem = .activity })
+                    DashboardView(viewModel: viewModel, onOpenSettings: { settingsInitialTab = .asmAbm; showingSettings = true }, onNavigateToActivity: { selectedNavItem = .activity }, onNavigateToMDMServers: { selectedNavItem = .mdmServers })
                 case .devices:
                     DevicesView(viewModel: viewModel)
                 case .mdmServers:
@@ -262,19 +262,19 @@ struct ContentView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .padding(.top, 8)
                 .padding(.horizontal, 16)
-                .onAppear {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            // Only dismiss if it's still the same toast
-                            if viewModel.activeToast?.id == toast.id {
-                                viewModel.dismissToast()
-                            }
-                        }
-                    }
-                }
+                .zIndex(999)
             }
         }
         .animation(.easeInOut(duration: 0.25), value: viewModel.activeToast)
+        .task(id: viewModel.activeToast?.id) {
+            guard let toastId = viewModel.activeToast?.id else { return }
+            try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
+            withAnimation(.easeInOut(duration: 0.25)) {
+                if viewModel.activeToast?.id == toastId {
+                    viewModel.dismissToast()
+                }
+            }
+        }
     }
 }
 
@@ -300,32 +300,33 @@ struct ToastBanner: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Image(systemName: icon)
                 .foregroundColor(color)
-                .font(.system(size: 16))
+                .font(.system(size: 20))
             Text(toast.message)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 14, weight: .medium))
                 .foregroundColor(.primary)
-            Spacer()
+                .lineLimit(2)
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: 12)
                 .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+                .shadow(color: .black.opacity(0.15), radius: 10, y: 4)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: 12)
                 .stroke(color.opacity(0.3), lineWidth: 1)
         )
+        .frame(maxWidth: 420)
     }
 }
 
@@ -959,6 +960,8 @@ struct ConnectionSettingsSheet: View {
                             Label("Update Computers", systemImage: "checkmark.circle.fill")
                             Label("Read Mobile Devices", systemImage: "checkmark.circle.fill")
                             Label("Update Mobile Devices", systemImage: "checkmark.circle.fill")
+                            Label("Read Users", systemImage: "checkmark.circle.fill")
+                            Label("Update Users", systemImage: "checkmark.circle.fill")
                         }
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundColor(.green)
@@ -1141,12 +1144,18 @@ struct DashboardView: View {
     @ObservedObject var viewModel: ABMViewModel
     let onOpenSettings: () -> Void
     let onNavigateToActivity: () -> Void
+    let onNavigateToMDMServers: () -> Void
     @State private var showingExporter = false
-    
+    @State private var hasTriggeredAutoCompare = false
+
+    private var comparisonHasData: Bool {
+        !viewModel.devicesNotInJamf.isEmpty || !viewModel.matchedSerials.isEmpty || !viewModel.skippedSerials.isEmpty
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                // Header
+                // Header with actions
                 HStack {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Dashboard")
@@ -1156,53 +1165,206 @@ struct DashboardView: View {
                             .foregroundColor(.secondary)
                     }
                     Spacer()
-                    
-                    Button(action: { viewModel.connectToABM() }) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.clockwise")
-                            Text("Refresh All")
+
+                    HStack(spacing: 10) {
+                        Button(action: { showingExporter = true }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "square.and.arrow.up")
+                                Text("Export")
+                            }
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 4)
                         }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 4)
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.devices.isEmpty)
+
+                        Button(action: { onNavigateToActivity() }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "clock.arrow.circlepath")
+                                Text("Activity")
+                            }
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 4)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.clientAssertion == nil)
+
+                        Button(action: { viewModel.connectToABM() }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.clockwise")
+                                Text("Refresh All")
+                            }
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 4)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(viewModel.clientAssertion == nil || viewModel.isLoading)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(viewModel.clientAssertion == nil || viewModel.isLoading)
                 }
                 .padding(.bottom, 4)
-                
-                // Stats Cards
-                LazyVGrid(columns: [
-                    GridItem(.flexible(), spacing: 16),
-                    GridItem(.flexible(), spacing: 16),
-                    GridItem(.flexible(), spacing: 16)
-                ], spacing: 16) {
-                    StatCard(
-                        title: "Total Devices",
-                        value: "\(viewModel.devices.count)",
-                        icon: "laptopcomputer.and.iphone",
-                        color: .blue
-                    )
-                    
-                    StatCard(
-                        title: "MDM Servers",
-                        value: "\(viewModel.mdmServers.count)",
-                        icon: "server.rack",
-                        color: .purple
-                    )
+
+                // MDM Servers — clickable card
+                HStack(spacing: 16) {
+                    Button(action: { onNavigateToMDMServers() }) {
+                        HStack(spacing: 14) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.purple.opacity(0.15))
+                                    .frame(width: 44, height: 44)
+                                Image(systemName: "server.rack")
+                                    .font(.system(size: 20, weight: .medium))
+                                    .foregroundStyle(Color.purple.gradient)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(viewModel.mdmServers.count)")
+                                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                                Text("MDM Servers")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color(NSColor.controlBackgroundColor))
+                                .shadow(color: .black.opacity(0.05), radius: 6, x: 0, y: 2)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.purple.opacity(0.2), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: 280)
+
+                    Spacer()
                 }
-                .padding(.horizontal, 2) // Small padding to prevent shadow clipping
-                
+                .padding(.horizontal, 2)
+
+                // Inventory Comparison — hero section
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Text("Inventory Comparison")
+                            .font(.title3)
+                            .fontWeight(.semibold)
+                        Spacer()
+                        if comparisonHasData {
+                            Button(action: { viewModel.bulkSyncCompare() }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                        .font(.caption)
+                                    Text("Re-compare")
+                                        .font(.caption)
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(viewModel.bulkSyncPhase == .fetching)
+                        }
+                    }
+
+                    if !viewModel.isJamfConnected && !comparisonHasData {
+                        // No MDM connected yet
+                        HStack(spacing: 12) {
+                            Image(systemName: "info.circle")
+                                .font(.title3)
+                                .foregroundColor(.secondary)
+                            Text("Connect an MDM server to see inventory comparison data.")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(16)
+                    } else if viewModel.bulkSyncPhase == .fetching && !comparisonHasData {
+                        // Loading comparison for the first time
+                        HStack(spacing: 12) {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("Running inventory comparison...")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(16)
+                    } else if comparisonHasData {
+                        // Show comparison stats
+                        let totalASM = viewModel.devices.count
+                        let foundInMDM = viewModel.matchedSerials.count + viewModel.skippedSerials.count
+                        let notInMDM = viewModel.devicesNotInJamf.count
+                        let needsSync = viewModel.matchedSerials.count
+                        let upToDate = viewModel.skippedSerials.count
+
+                        LazyVGrid(columns: [
+                            GridItem(.flexible(), spacing: 12),
+                            GridItem(.flexible(), spacing: 12),
+                            GridItem(.flexible(), spacing: 12),
+                            GridItem(.flexible(), spacing: 12),
+                            GridItem(.flexible(), spacing: 12)
+                        ], spacing: 12) {
+                            StatCard(
+                                title: "ASM Devices",
+                                value: "\(totalASM)",
+                                icon: "apple.logo",
+                                color: .blue
+                            )
+                            StatCard(
+                                title: "Found in MDM",
+                                value: "\(foundInMDM)",
+                                icon: "checkmark.circle",
+                                color: .green
+                            )
+                            StatCard(
+                                title: "Not in MDM",
+                                value: "\(notInMDM)",
+                                icon: "exclamationmark.triangle",
+                                color: .red
+                            )
+                            StatCard(
+                                title: "Needs Sync",
+                                value: "\(needsSync)",
+                                icon: "arrow.triangle.2.circlepath",
+                                color: .orange
+                            )
+                            StatCard(
+                                title: "Up to Date",
+                                value: "\(upToDate)",
+                                icon: "checkmark.seal",
+                                color: .mint
+                            )
+                        }
+                    } else {
+                        // MDM connected but no comparison run yet — prompt
+                        HStack(spacing: 12) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.title3)
+                                .foregroundColor(.orange)
+                            Text("MDM connected. Comparison will run automatically when devices load.")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(16)
+                    }
+                }
+                .padding(20)
+                .background(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(Color(NSColor.controlBackgroundColor))
+                        .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: 2)
+                )
+
                 // Device Breakdown
                 if !viewModel.devices.isEmpty {
                     VStack(alignment: .leading, spacing: 16) {
                         Text("Device Breakdown")
                             .font(.title3)
                             .fontWeight(.semibold)
-                        
+
                         HStack(spacing: 16) {
                             DeviceTypeCard(
                                 type: "Mac",
-                                count: viewModel.devices.filter { 
+                                count: viewModel.devices.filter {
                                     $0.os?.lowercased() == "mac"
                                 }.count,
                                 icon: "desktopcomputer",
@@ -1210,7 +1372,7 @@ struct DashboardView: View {
                             )
                             DeviceTypeCard(
                                 type: "iPhone",
-                                count: viewModel.devices.filter { 
+                                count: viewModel.devices.filter {
                                     $0.os?.lowercased() == "iphone"
                                 }.count,
                                 icon: "iphone",
@@ -1218,7 +1380,7 @@ struct DashboardView: View {
                             )
                             DeviceTypeCard(
                                 type: "iPad",
-                                count: viewModel.devices.filter { 
+                                count: viewModel.devices.filter {
                                     $0.os?.lowercased() == "ipad"
                                 }.count,
                                 icon: "ipad",
@@ -1226,7 +1388,7 @@ struct DashboardView: View {
                             )
                             DeviceTypeCard(
                                 type: "Apple TV",
-                                count: viewModel.devices.filter { 
+                                count: viewModel.devices.filter {
                                     $0.os?.lowercased() == "appletv"
                                 }.count,
                                 icon: "appletv",
@@ -1241,35 +1403,7 @@ struct DashboardView: View {
                             .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: 2)
                     )
                 }
-                
-                // Quick Actions
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Quick Actions")
-                        .font(.title3)
-                        .fontWeight(.semibold)
-                    
-                    HStack(spacing: 16) {
-                        QuickActionButton(
-                            title: "Export Devices",
-                            icon: "square.and.arrow.up",
-                            color: .green
-                        ) {
-                            showingExporter = true
-                        }
-                        .disabled(viewModel.devices.isEmpty)
-                        
-                        QuickActionButton(
-                            title: "Check Activity",
-                            icon: "clock.arrow.circlepath",
-                            color: .blue
-                        ) {
-                            onNavigateToActivity()
-                        }
-                        .disabled(viewModel.clientAssertion == nil)
-                    }
-                }
-                .padding(.horizontal, 2) // Small padding to prevent shadow clipping
-                
+
                 // Connection Status — only show if no profiles exist yet
                 if viewModel.clientAssertion == nil && viewModel.savedProfiles.isEmpty {
                     HStack(spacing: 16) {
@@ -1278,19 +1412,19 @@ struct DashboardView: View {
                             .foregroundStyle(.orange.gradient)
                             .frame(width: 44, height: 44)
                             .background(Circle().fill(Color.orange.opacity(0.1)))
-                        
+
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Connect to Apple Business Manager")
                                 .font(.subheadline)
                                 .fontWeight(.semibold)
-                            
+
                             Text("Configure your ABM API credentials")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        
+
                         Spacer()
-                        
+
                         Button("Configure", action: onOpenSettings)
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
@@ -1308,6 +1442,18 @@ struct DashboardView: View {
         }
         .scrollContentBackground(.hidden)
         .background(Color(NSColor.windowBackgroundColor))
+        .onChange(of: viewModel.isJamfConnected) { _, connected in
+            if connected && !hasTriggeredAutoCompare && !viewModel.devices.isEmpty {
+                hasTriggeredAutoCompare = true
+                viewModel.bulkSyncCompare()
+            }
+        }
+        .onChange(of: viewModel.devices.count) { _, count in
+            if count > 0 && viewModel.isJamfConnected && !hasTriggeredAutoCompare && !comparisonHasData {
+                hasTriggeredAutoCompare = true
+                viewModel.bulkSyncCompare()
+            }
+        }
         .fileExporter(
             isPresented: $showingExporter,
             document: CSVDocument(devices: viewModel.devices),
@@ -1317,6 +1463,7 @@ struct DashboardView: View {
             switch result {
             case .success(let url):
                 viewModel.showToast("Exported to \(url.lastPathComponent)", type: .success)
+                viewModel.logActivity(.export, title: "Devices Exported", detail: url.lastPathComponent)
             case .failure(let error):
                 viewModel.showToast("Export failed: \(error.localizedDescription)", type: .error)
             }
@@ -1664,6 +1811,40 @@ struct DevicesView: View {
                     }
                     .width(min: 90, ideal: 100)
 
+                    TableColumn("Sync Status") { device in
+                        let serial = device.serialNumber.uppercased()
+                        if viewModel.devicesNotInJamf.contains(serial) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.red)
+                                Text("Not in MDM")
+                                    .foregroundColor(.red)
+                            }
+                            .font(.caption)
+                        } else if viewModel.matchedSerials.contains(serial) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .foregroundColor(.orange)
+                                Text("Needs Sync")
+                                    .foregroundColor(.orange)
+                            }
+                            .font(.caption)
+                        } else if viewModel.skippedSerials.contains(serial) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .foregroundColor(.mint)
+                                Text("Up to Date")
+                                    .foregroundColor(.mint)
+                            }
+                            .font(.caption)
+                        } else {
+                            Text("—")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .width(min: 90, ideal: 110)
+
                     TableColumn("Added", value: \.sortableAddedDate) { device in
                         Text(formattedAddedDates[device.id] ?? "—")
                             .font(.caption)
@@ -1733,6 +1914,7 @@ struct DevicesView: View {
             switch result {
             case .success(let url):
                 viewModel.showToast("Exported to \(url.lastPathComponent)", type: .success)
+                viewModel.logActivity(.export, title: "Devices Exported", detail: url.lastPathComponent)
             case .failure(let error):
                 viewModel.showToast("Export failed: \(error.localizedDescription)", type: .error)
             }
@@ -1740,13 +1922,19 @@ struct DevicesView: View {
     }
 
     private func deviceIcon(for device: OrgDevice) -> String {
-        switch device.os?.lowercased() {
-        case "iphone": return "iphone"
-        case "ipad": return "ipad"
-        case "mac": return "desktopcomputer"
-        case "appletv": return "appletv"
-        default: return "questionmark.square"
-        }
+        deviceIconName(for: device)
+    }
+}
+
+// MARK: - Shared Helpers
+
+private func deviceIconName(for device: OrgDevice) -> String {
+    switch device.os?.lowercased() {
+    case "iphone": return "iphone"
+    case "ipad": return "ipad"
+    case "mac": return "desktopcomputer"
+    case "appletv": return "appletv"
+    default: return "questionmark.square"
     }
 }
 
@@ -2034,7 +2222,7 @@ struct DetailItem: View {
 struct MDMServersView: View {
     @ObservedObject var viewModel: ABMViewModel
     @State private var selectedServer: MDMServer?
-    
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -2051,9 +2239,9 @@ struct MDMServersView: View {
             }
             .padding(20)
             .background(Color(NSColor.windowBackgroundColor))
-            
+
             Divider()
-            
+
             if viewModel.mdmServers.isEmpty {
                 Spacer()
                 ContentUnavailableView(
@@ -2067,7 +2255,7 @@ struct MDMServersView: View {
                     MDMServerRow(server: server)
                 }
                 .listStyle(.inset(alternatesRowBackgrounds: true))
-                
+
                 if let server = selectedServer {
                     HStack {
                         Text("Selected: \(server.attributes.serverName)")
@@ -2091,7 +2279,7 @@ struct MDMServersView: View {
 // MARK: - MDM Server Row
 struct MDMServerRow: View {
     let server: MDMServer
-    
+
     var body: some View {
         HStack(spacing: 14) {
             ZStack {
@@ -2102,7 +2290,7 @@ struct MDMServerRow: View {
                     .font(.title3)
                     .foregroundColor(.purple)
             }
-            
+
             VStack(alignment: .leading, spacing: 3) {
                 Text(server.attributes.serverName)
                     .font(.system(.body, weight: .medium))
@@ -2110,9 +2298,9 @@ struct MDMServerRow: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
-            
+
             Text(server.id)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundColor(.secondary)
@@ -2131,84 +2319,101 @@ struct DeviceAssignmentView: View {
     @State private var searchText = ""
     @State private var showingConfirmation = false
 
-    var filteredDevices: [OrgDevice] {
-        if searchText.isEmpty {
-            return viewModel.devices
+    // Filters
+    @State private var filterOS = "All"
+    @State private var filterStatus = "All"        // All, Assigned, Unassigned
+    @State private var filterMDMFound = "All"       // All, Found in MDM, Not in MDM
+    @State private var filterSyncStatus = "All"     // All, Needs Sync, Up to Date
+
+    @State private var displayedDevices: [OrgDevice] = []
+    @State private var sortOrder = [KeyPathComparator(\OrgDevice.sortableModel, order: .forward)]
+
+    private func updateDisplayedDevices() {
+        var devices = viewModel.devices
+
+        // OS filter
+        if filterOS != "All" {
+            let target: String
+            switch filterOS {
+            case "Apple TV": target = "appletv"
+            default: target = filterOS.lowercased()
+            }
+            devices = devices.filter { ($0.os?.lowercased() ?? "") == target }
         }
-        let query = searchText.lowercased()
-        return viewModel.devices.filter { device in
-            let model = (device.model ?? "").lowercased()
-            let serial = device.serialNumber.lowercased()
-            let productType = (device.productType ?? "").lowercased()
-            return model.contains(query) || serial.contains(query) || productType.contains(query)
+
+        // Enrollment status filter
+        if filterStatus != "All" {
+            devices = devices.filter { ($0.enrollmentState ?? "").uppercased() == filterStatus.uppercased() }
         }
+
+        // MDM found filter (from last inventory sync)
+        if filterMDMFound == "Found in MDM" {
+            // Found = matched or up to date (not in the "not found" set)
+            devices = devices.filter { !viewModel.devicesNotInJamf.contains($0.serialNumber.uppercased()) }
+            // Only show devices we actually checked (i.e., devicesNotInJamf was populated)
+            if viewModel.devicesNotInJamf.isEmpty && viewModel.matchedSerials.isEmpty {
+                // No sync has been run yet — show all
+            }
+        } else if filterMDMFound == "Not in MDM" {
+            devices = devices.filter { viewModel.devicesNotInJamf.contains($0.serialNumber.uppercased()) }
+        }
+
+        // Sync status filter
+        if filterSyncStatus == "Needs Sync" {
+            devices = devices.filter { viewModel.matchedSerials.contains($0.serialNumber.uppercased()) }
+        } else if filterSyncStatus == "Up to Date" {
+            // Up to date = in Jamf but NOT in needsSync set
+            devices = devices.filter {
+                let serial = $0.serialNumber.uppercased()
+                return !viewModel.devicesNotInJamf.contains(serial) && !viewModel.matchedSerials.contains(serial)
+            }
+        }
+
+        // Search
+        if !searchText.isEmpty {
+            let query = searchText.lowercased()
+            devices = devices.filter { device in
+                (device.model ?? "").lowercased().contains(query) ||
+                device.serialNumber.lowercased().contains(query) ||
+                (device.productType ?? "").lowercased().contains(query) ||
+                (device.orderNumber ?? "").lowercased().contains(query)
+            }
+        }
+
+        displayedDevices = devices.sorted(using: sortOrder)
+    }
+
+    private var activeFilterCount: Int {
+        var count = 0
+        if filterOS != "All" { count += 1 }
+        if filterStatus != "All" { count += 1 }
+        if filterMDMFound != "All" { count += 1 }
+        if filterSyncStatus != "All" { count += 1 }
+        if !searchText.isEmpty { count += 1 }
+        return count
     }
 
     var body: some View {
         VStack(spacing: 0) {
             // Header
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Assign Devices")
-                        .font(.largeTitle)
-                        .fontWeight(.bold)
-                    Text("Bulk assign or unassign devices to MDM servers")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            }
-            .padding(20)
-            .background(Color(NSColor.windowBackgroundColor))
-            
-            Divider()
-            
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    // Action Type
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Action")
-                            .font(.headline)
-                        
-                        Picker("Action", selection: $actionType) {
-                            Label("Assign to MDM", systemImage: "arrow.right.circle").tag("ASSIGN")
-                            Label("Unassign from MDM", systemImage: "arrow.left.circle").tag("UNASSIGN")
-                        }
-                        .pickerStyle(.segmented)
+            VStack(spacing: 16) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Assign Devices")
+                            .font(.largeTitle)
+                            .fontWeight(.bold)
+                        Text("Bulk assign or unassign devices to MDM servers")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
                     }
-                    
-                    // MDM Server Selection
-                    if actionType == "ASSIGN" {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Target MDM Server")
-                                .font(.headline)
-                            
-                            Picker("MDM Server", selection: $selectedMDM) {
-                                Text("Select a server...").tag("")
-                                ForEach(viewModel.mdmServers) { server in
-                                    Text(server.attributes.serverName).tag(server.id)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                        }
-                    }
-                    
-                    // Device Selection
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Select Devices")
-                                .font(.headline)
-                            Spacer()
-                            Text("\(selectedDevices.count) selected")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                    Spacer()
 
-                        // Search Bar
+                    HStack(spacing: 12) {
+                        // Search
                         HStack(spacing: 8) {
                             Image(systemName: "magnifyingglass")
                                 .foregroundColor(.secondary)
-                            TextField("Search by model, serial number, or product type...", text: $searchText)
+                            TextField("Search...", text: $searchText)
                                 .textFieldStyle(.plain)
                             if !searchText.isEmpty {
                                 Button(action: { searchText = "" }) {
@@ -2219,90 +2424,268 @@ struct DeviceAssignmentView: View {
                             }
                         }
                         .padding(8)
+                        .frame(width: 220)
                         .background(
                             RoundedRectangle(cornerRadius: 8)
                                 .fill(Color(NSColor.controlBackgroundColor))
                         )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-                        )
-
-                        if viewModel.devices.isEmpty {
-                            Text("No devices available. Connect to ABM first.")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                                .padding()
-                        } else if filteredDevices.isEmpty {
-                            Text("No devices match \"\(searchText)\"")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                                .padding()
-                        } else {
-                            HStack {
-                                Text("\(filteredDevices.count) device\(filteredDevices.count == 1 ? "" : "s") shown")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Spacer()
-                            }
-
-                            List(filteredDevices, selection: $selectedDevices) { device in
-                                HStack {
-                                    Text(device.model ?? device.serialNumber)
-                                    Spacer()
-                                    Text(device.serialNumber)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            .listStyle(.bordered)
-                            .frame(height: 250)
-                        }
                     }
-                    
-                    // Execute Button
-                    Button(action: {
-                        showingConfirmation = true
-                    }) {
-                        HStack {
-                            if viewModel.isLoading {
-                                ProgressView()
-                                    .scaleEffect(0.8)
-                                    .frame(width: 16, height: 16)
-                            } else {
-                                Image(systemName: "bolt.fill")
-                            }
-                            Text(viewModel.isLoading ? "Processing..." : "Execute \(actionType == "ASSIGN" ? "Assignment" : "Unassignment")")
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(selectedDevices.isEmpty || (actionType == "ASSIGN" && selectedMDM.isEmpty) || viewModel.isLoading)
-                    .alert("Confirm \(actionType == "ASSIGN" ? "Assignment" : "Unassignment")", isPresented: $showingConfirmation) {
-                        Button("Cancel", role: .cancel) { }
-                        Button(actionType == "ASSIGN" ? "Assign" : "Unassign", role: .destructive) {
-                            Task {
-                                await viewModel.assignDevices(
-                                    deviceIds: Array(selectedDevices),
-                                    mdmId: actionType == "ASSIGN" ? selectedMDM : nil
-                                )
-                            }
-                        }
-                    } message: {
-                        if actionType == "ASSIGN" {
-                            let serverName = viewModel.mdmServers.first(where: { $0.id == selectedMDM })?.attributes.serverName ?? "selected server"
-                            Text("Are you sure you want to assign \(selectedDevices.count) device\(selectedDevices.count == 1 ? "" : "s") to \(serverName)?")
-                        } else {
-                            Text("Are you sure you want to unassign \(selectedDevices.count) device\(selectedDevices.count == 1 ? "" : "s") from their MDM server?")
-                        }
-                    }
-                    
                 }
-                .padding(24)
-                .padding(.bottom, 80) // Add bottom padding to scrollable content
+
+                // Filters
+                HStack(spacing: 10) {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Picker("OS", selection: $filterOS) {
+                        Text("All OS").tag("All")
+                        Text("Mac").tag("Mac")
+                        Text("iPhone").tag("iPhone")
+                        Text("iPad").tag("iPad")
+                        Text("Apple TV").tag("Apple TV")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 100)
+
+                    Picker("Status", selection: $filterStatus) {
+                        Text("All Status").tag("All")
+                        Text("Assigned").tag("Assigned")
+                        Text("Unassigned").tag("Unassigned")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 115)
+
+                    Picker("MDM", selection: $filterMDMFound) {
+                        Text("All Devices").tag("All")
+                        Text("Found in MDM").tag("Found in MDM")
+                        Text("Not in MDM").tag("Not in MDM")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 130)
+
+                    Picker("Sync", selection: $filterSyncStatus) {
+                        Text("All Sync").tag("All")
+                        Text("Needs Sync").tag("Needs Sync")
+                        Text("Up to Date").tag("Up to Date")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 120)
+
+                    if activeFilterCount > 0 {
+                        Button("Clear") {
+                            filterOS = "All"
+                            filterStatus = "All"
+                            filterMDMFound = "All"
+                            filterSyncStatus = "All"
+                            searchText = ""
+                        }
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    }
+
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                )
             }
+            .padding(20)
+            .background(Color(NSColor.windowBackgroundColor))
+
+            Divider()
+
+            // Device Table
+            if viewModel.devices.isEmpty {
+                Spacer()
+                ContentUnavailableView(
+                    "No Devices",
+                    systemImage: "laptopcomputer.and.iphone",
+                    description: Text("Connect to ABM to load your devices")
+                )
+                Spacer()
+            } else if displayedDevices.isEmpty {
+                Spacer()
+                if activeFilterCount > 0 {
+                    ContentUnavailableView(
+                        "No Matching Devices",
+                        systemImage: "line.3.horizontal.decrease.circle",
+                        description: Text("Try adjusting your filters or search")
+                    )
+                } else {
+                    ContentUnavailableView.search(text: searchText)
+                }
+                Spacer()
+            } else {
+                Table(displayedDevices, selection: $selectedDevices, sortOrder: $sortOrder) {
+                    TableColumn("Model", value: \.sortableModel) { device in
+                        HStack(spacing: 8) {
+                            Image(systemName: deviceIconName(for: device))
+                                .foregroundColor(.blue)
+                                .frame(width: 16)
+                            Text(device.model ?? device.serialNumber)
+                                .lineLimit(1)
+                        }
+                    }
+                    .width(min: 140, ideal: 180)
+
+                    TableColumn("Serial Number", value: \.serialNumber) { device in
+                        HStack(spacing: 4) {
+                            Text(device.serialNumber)
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                            if viewModel.devicesNotInJamf.contains(device.serialNumber.uppercased()) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.red)
+                                    .font(.caption2)
+                                    .help("Not found in MDM during last inventory sync")
+                            } else if viewModel.matchedSerials.contains(device.serialNumber.uppercased()) {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .foregroundColor(.orange)
+                                    .font(.caption2)
+                                    .help("Needs sync — data differences found")
+                            }
+                        }
+                    }
+                    .width(min: 110, ideal: 150)
+
+                    TableColumn("OS", value: \.sortableOS) { device in
+                        Text(device.os ?? "—")
+                            .lineLimit(1)
+                    }
+                    .width(min: 60, ideal: 70)
+
+                    TableColumn("Product Type", value: \.sortableProductType) { device in
+                        Text(device.productType ?? "—")
+                            .font(.caption)
+                            .lineLimit(1)
+                    }
+                    .width(min: 100, ideal: 130)
+
+                    TableColumn("Status", value: \.sortableStatus) { device in
+                        let status = device.enrollmentState ?? "Unknown"
+                        let color: Color = {
+                            switch status.uppercased() {
+                            case "ASSIGNED": return .green
+                            case "UNASSIGNED": return .orange
+                            default: return .gray
+                            }
+                        }()
+                        Text(status)
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(color.opacity(0.15)))
+                            .foregroundColor(color)
+                    }
+                    .width(min: 90, ideal: 100)
+
+                    TableColumn("Added", value: \.sortableAddedDate) { device in
+                        Text(OrgDevice.formatDate(device.addedDate))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    .width(min: 85, ideal: 100)
+                }
+                .tableStyle(.inset(alternatesRowBackgrounds: true))
+            }
+
+            // Bottom bar: action controls + execute
+            HStack(spacing: 12) {
+                // Device count
+                Text("\(displayedDevices.count) of \(viewModel.devices.count) devices")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if selectedDevices.count > 0 {
+                    Text("\(selectedDevices.count) selected")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.accentColor)
+                }
+
+                Spacer()
+
+                // Action controls
+                Picker("", selection: $actionType) {
+                    Text("Assign").tag("ASSIGN")
+                    Text("Unassign").tag("UNASSIGN")
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 170)
+
+                if actionType == "ASSIGN" {
+                    Picker("", selection: $selectedMDM) {
+                        Text("Select server...").tag("")
+                        ForEach(viewModel.mdmServers) { server in
+                            Text(server.attributes.serverName).tag(server.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 180)
+                }
+
+                Button(action: {
+                    showingConfirmation = true
+                }) {
+                    HStack(spacing: 6) {
+                        if viewModel.isLoading {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                                .frame(width: 14, height: 14)
+                        } else {
+                            Image(systemName: actionType == "ASSIGN" ? "arrow.right.circle.fill" : "arrow.uturn.left.circle.fill")
+                        }
+                        Text(viewModel.isLoading ? "Processing..." : (actionType == "ASSIGN" ? "Assign" : "Unassign"))
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(actionType == "ASSIGN" ? .accentColor : .orange)
+                .controlSize(.regular)
+                .disabled(selectedDevices.isEmpty || (actionType == "ASSIGN" && selectedMDM.isEmpty) || viewModel.isLoading)
+                .alert("Confirm \(actionType == "ASSIGN" ? "Assignment" : "Unassignment")", isPresented: $showingConfirmation) {
+                    Button("Cancel", role: .cancel) { }
+                    Button(actionType == "ASSIGN" ? "Assign" : "Unassign", role: .destructive) {
+                        Task {
+                            await viewModel.assignDevices(
+                                deviceIds: Array(selectedDevices),
+                                mdmId: actionType == "ASSIGN" ? selectedMDM : nil
+                            )
+                        }
+                    }
+                } message: {
+                    if actionType == "ASSIGN" {
+                        let serverName = viewModel.mdmServers.first(where: { $0.id == selectedMDM })?.attributes.serverName ?? "selected server"
+                        Text("Are you sure you want to assign \(selectedDevices.count) device\(selectedDevices.count == 1 ? "" : "s") to \(serverName)?")
+                    } else {
+                        Text("Are you sure you want to unassign \(selectedDevices.count) device\(selectedDevices.count == 1 ? "" : "s") from their MDM server?")
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.controlBackgroundColor))
         }
+        .onAppear { updateDisplayedDevices() }
+        .onChange(of: sortOrder) { _, _ in
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { updateDisplayedDevices() }
+        }
+        .onChange(of: filterOS) { _, _ in updateDisplayedDevices() }
+        .onChange(of: filterStatus) { _, _ in updateDisplayedDevices() }
+        .onChange(of: filterMDMFound) { _, _ in updateDisplayedDevices() }
+        .onChange(of: filterSyncStatus) { _, _ in updateDisplayedDevices() }
+        .onChange(of: searchText) { _, _ in updateDisplayedDevices() }
+        .onChange(of: viewModel.devices) { _, _ in updateDisplayedDevices() }
+        .onChange(of: viewModel.matchedSerials) { _, _ in updateDisplayedDevices() }
+        .onChange(of: viewModel.devicesNotInJamf) { _, _ in updateDisplayedDevices() }
     }
 }
 
@@ -2310,105 +2693,212 @@ struct DeviceAssignmentView: View {
 struct ActivityStatusView: View {
     @ObservedObject var viewModel: ABMViewModel
     @State private var activityId = ""
-    
+    @State private var filterCategory: ActivityEntry.ActivityCategory?
+
+    private var filteredHistory: [ActivityEntry] {
+        if let cat = filterCategory {
+            return viewModel.activityHistory.filter { $0.category == cat }
+        }
+        return viewModel.activityHistory
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
+    private func activityColor(_ category: ActivityEntry.ActivityCategory) -> Color {
+        switch category {
+        case .connection: return .purple
+        case .sync: return .orange
+        case .assignment: return .blue
+        case .export: return .green
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Activity Status")
+                    Text("Activity")
                         .font(.largeTitle)
                         .fontWeight(.bold)
-                    Text("Track batch operation progress")
+                    Text("\(viewModel.activityHistory.count) events this session")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
                 Spacer()
+
+                // Activity ID lookup
+                HStack(spacing: 8) {
+                    TextField("Activity ID...", text: $activityId)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 200)
+
+                    Button("Check Status") {
+                        Task {
+                            await viewModel.checkActivityStatus(activityId: activityId)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(activityId.isEmpty)
+                }
             }
             .padding(20)
             .background(Color(NSColor.windowBackgroundColor))
-            
-            Divider()
-            
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    // Activity ID Input
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Check Activity")
-                            .font(.headline)
-                        
-                        HStack(spacing: 12) {
-                            TextField("Enter Activity ID...", text: $activityId)
-                                .textFieldStyle(.roundedBorder)
-                            
-                            Button("Check Status") {
-                                Task {
-                                    await viewModel.checkActivityStatus(activityId: activityId)
-                                }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(activityId.isEmpty)
+
+            // Category filter chips
+            HStack(spacing: 8) {
+                Button(action: { filterCategory = nil }) {
+                    Text("All")
+                        .font(.caption)
+                        .fontWeight(filterCategory == nil ? .semibold : .regular)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(filterCategory == nil ? Color.accentColor.opacity(0.15) : Color.clear))
+                        .foregroundColor(filterCategory == nil ? .accentColor : .secondary)
+                }
+                .buttonStyle(.plain)
+
+                ForEach(ActivityEntry.ActivityCategory.allCases, id: \.rawValue) { cat in
+                    Button(action: { filterCategory = (filterCategory == cat) ? nil : cat }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: cat.defaultIcon)
+                                .font(.system(size: 10))
+                            Text(cat.rawValue)
+                                .font(.caption)
                         }
+                        .fontWeight(filterCategory == cat ? .semibold : .regular)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(filterCategory == cat ? activityColor(cat).opacity(0.15) : Color.clear))
+                        .foregroundColor(filterCategory == cat ? activityColor(cat) : .secondary)
                     }
-                    
-                    // Last Activity
-                    if let lastId = viewModel.lastActivityId {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Recent Activity")
-                                .font(.headline)
-                            
-                            HStack {
-                                Text(lastId)
-                                    .font(.system(.body, design: .monospaced))
-                                    .textSelection(.enabled)
-                                Spacer()
-                                Button("Check") {
-                                    activityId = lastId
-                                    Task {
-                                        await viewModel.checkActivityStatus(activityId: lastId)
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                            }
-                            .padding(12)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(Color(NSColor.controlBackgroundColor))
-                            )
+                    .buttonStyle(.plain)
+                }
+
+                Spacer()
+
+                if let lastId = viewModel.lastActivityId {
+                    HStack(spacing: 4) {
+                        Text("Last ABM Activity:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(lastId)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                        Button {
+                            activityId = lastId
+                            Task { await viewModel.checkActivityStatus(activityId: lastId) }
+                        } label: {
+                            Image(systemName: "arrow.right.circle")
+                                .font(.caption)
                         }
-                    }
-                    
-                    // Activity Result
-                    if let status = viewModel.activityStatus {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Activity Details")
-                                .font(.headline)
-                            
-                            LazyVGrid(columns: [
-                                GridItem(.flexible()),
-                                GridItem(.flexible())
-                            ], spacing: 16) {
-                                DetailItem(label: "Activity ID", value: status.data.id, monospaced: true)
-                                DetailItem(label: "Status", value: status.data.attributes.status)
-                                DetailItem(label: "Sub-Status", value: status.data.attributes.subStatus)
-                                DetailItem(label: "Created", value: status.data.attributes.createdDateTime)
-                            }
-                            .padding(16)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .fill(Color(NSColor.controlBackgroundColor))
-                            )
-                        }
+                        .buttonStyle(.plain)
                     }
                 }
-                .padding(24)
-                .padding(.bottom, 80) // Add bottom padding to scrollable content
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.controlBackgroundColor))
+
+            Divider()
+
+            // Activity Result (if checked)
+            if let status = viewModel.activityStatus {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("ABM Activity Details", systemImage: "info.circle")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Spacer()
+                        Button { viewModel.activityStatus = nil } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    HStack(spacing: 24) {
+                        DetailItem(label: "Activity ID", value: status.data.id, monospaced: true)
+                        DetailItem(label: "Status", value: status.data.attributes.status)
+                        DetailItem(label: "Sub-Status", value: status.data.attributes.subStatus)
+                    }
+                }
+                .padding(12)
+                .background(Color(NSColor.controlBackgroundColor))
+
+                Divider()
+            }
+
+            // History List
+            if filteredHistory.isEmpty {
+                Spacer()
+                ContentUnavailableView(
+                    "No Activity Yet",
+                    systemImage: "clock.arrow.circlepath",
+                    description: Text(filterCategory != nil ? "No \(filterCategory!.rawValue.lowercased()) events yet" : "Actions you take will appear here")
+                )
+                Spacer()
+            } else {
+                List(filteredHistory) { entry in
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(activityColor(entry.category).opacity(0.15))
+                                .frame(width: 32, height: 32)
+                            Image(systemName: entry.icon)
+                                .font(.system(size: 14))
+                                .foregroundColor(activityColor(entry.category))
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.title)
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                            if !entry.detail.isEmpty {
+                                Text(entry.detail)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+
+                        Spacer()
+
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(Self.timeFormatter.string(from: entry.timestamp))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(entry.category.rawValue)
+                                .font(.system(size: 9))
+                                .fontWeight(.medium)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(activityColor(entry.category).opacity(0.12)))
+                                .foregroundColor(activityColor(entry.category))
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .listStyle(.inset(alternatesRowBackgrounds: true))
             }
         }
     }
 }
 
-// MARK: - MDM Sync View (Jamf Pro)
+// MARK: - Inventory Sync View (Jamf Pro)
 struct JamfSyncView: View {
     @ObservedObject var viewModel: ABMViewModel
     var onOpenMDMSettings: () -> Void = {}
@@ -2456,9 +2946,9 @@ struct JamfSyncView: View {
                 // Header
                 HStack {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("MDM Sync")
+                        Text("Inventory Sync")
                             .font(.system(size: 34, weight: .bold, design: .rounded))
-                        Text("Sync purchasing data from \(viewModel.connectionLabel) to your MDM")
+                        Text("Compare your \(viewModel.connectionLabel) device inventory against your MDM and sync purchasing data — PO numbers, vendor, warranty dates, and AppleCare coverage.")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
@@ -2793,7 +3283,7 @@ struct JamfSyncView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Bulk Purchasing Sync")
                         .font(.headline)
-                    Text("Compare all \(viewModel.connectionLabel) devices against your MDM inventory, then push purchasing data only for devices with differences.")
+                    Text("Compare all \(viewModel.connectionLabel) devices against your MDM inventory — PO numbers, vendor, warranty, and AppleCare — then push updates only for devices with differences. Supports both computers and mobile devices.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -2870,7 +3360,7 @@ struct JamfSyncView: View {
                         bulkStatCard("MDM Mobile", "\(summary.jamfMobileCount)", icon: "iphone", color: .blue)
                         bulkStatCard("\(viewModel.connectionLabel) Devices", "\(summary.asmDeviceCount)", icon: "apple.logo", color: .purple)
                         bulkStatCard("Needs Sync", "\(viewModel.matchedSerials.count)", icon: "arrow.triangle.2.circlepath", color: .green)
-                        bulkStatCard("Up to Date", "\(summary.skippedNoChangeCount)", icon: "checkmark.seal", color: .gray)
+                        bulkStatCard("Up to Date", "\(viewModel.skippedSerials.count)", icon: "checkmark.seal", color: .gray)
                         bulkStatCard("Not in MDM", "\(summary.notInJamfCount)", icon: "exclamationmark.triangle", color: .red)
                     }
 
@@ -2886,7 +3376,7 @@ struct JamfSyncView: View {
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                         } else {
-                            Text("This will update purchasing data (PO number, vendor) for **\(viewModel.matchedSerials.count) devices** that have differences. \(summary.skippedNoChangeCount) devices are already up to date and will be skipped.")
+                            Text("This will update purchasing data (PO number, vendor) for **\(viewModel.matchedSerials.count) devices** that have differences. \(viewModel.skippedSerials.count) devices are already up to date and will be skipped.")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                         }
@@ -2900,10 +3390,34 @@ struct JamfSyncView: View {
                         }
                         .controlSize(.large)
 
+                        Button(action: { viewModel.bulkSyncPush(maxDevices: 10, computersOnly: true) }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "ant")
+                                Text("Test — 10 Computers")
+                            }
+                            .padding(.horizontal, 16)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        .controlSize(.large)
+                        .disabled(viewModel.matchedSerials.isEmpty)
+
+                        Button(action: { viewModel.bulkSyncPush(maxDevices: 10, mobileOnly: true) }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "ant")
+                                Text("Test — 10 Mobile")
+                            }
+                            .padding(.horizontal, 16)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.purple)
+                        .controlSize(.large)
+                        .disabled(viewModel.matchedSerials.isEmpty)
+
                         Button(action: { viewModel.bulkSyncPush() }) {
                             HStack(spacing: 8) {
                                 Image(systemName: "arrow.triangle.2.circlepath")
-                                Text("Proceed — Sync \(viewModel.matchedSerials.count) Devices")
+                                Text("Sync All \(viewModel.matchedSerials.count) Devices")
                             }
                             .padding(.horizontal, 24)
                         }
@@ -2992,7 +3506,7 @@ struct JamfSyncView: View {
                         Label("\(summary.pushFailCount) failed", systemImage: "xmark.circle.fill")
                             .foregroundColor(summary.pushFailCount > 0 ? .red : .secondary)
                             .font(.subheadline)
-                        Label("\(summary.skippedNoChangeCount) skipped", systemImage: "equal.circle.fill")
+                        Label("\(viewModel.skippedSerials.count) skipped", systemImage: "equal.circle.fill")
                             .foregroundColor(.secondary)
                             .font(.subheadline)
                         Label("\(summary.notInJamfCount) not in MDM", systemImage: "exclamationmark.triangle.fill")
@@ -3093,11 +3607,16 @@ struct JamfSyncView: View {
             isPresented: $showingReportExporter,
             document: PlainTextDocument(text: reportText),
             contentType: .plainText,
-            defaultFilename: "ABMate_sync_report_\(Date().formatted(date: .abbreviated, time: .omitted)).txt"
+            defaultFilename: {
+                let df = DateFormatter()
+                df.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+                return "ABMate_sync_report_\(df.string(from: Date())).txt"
+            }()
         ) { result in
             switch result {
             case .success(let url):
                 viewModel.showToast("Report saved to \(url.lastPathComponent)", type: .success)
+                viewModel.logActivity(.export, title: "Sync Report Saved", detail: url.lastPathComponent)
             case .failure(let error):
                 viewModel.showToast("Export failed: \(error.localizedDescription)", type: .error)
             }
@@ -3254,14 +3773,57 @@ struct JamfSyncView: View {
             // Pre-populate sync fields from ASM data
             if let device = foundASM {
                 poNumber = device.orderNumber ?? ""
+                // Use "Added to Org" date as PO date (when device was processed into DEP)
+                if let added = device.addedDate, !added.isEmpty {
+                    poDate = String(added.prefix(10))
+                }
             }
 
-            // Use AppleCare coverage for warranty info
-            if let activeCoverage = asmCoverage.first(where: { $0.attributes.status == "ACTIVE" }) ?? asmCoverage.first {
-                appleCareId = activeCoverage.attributes.agreementNumber ?? ""
-                if let endDate = activeCoverage.attributes.endDateTime {
+            // Use AppleCare coverage for warranty & agreement info
+            let activeCoverages = asmCoverage.filter { $0.attributes.status == "ACTIVE" }
+            let expiredCoverages = asmCoverage.filter { $0.attributes.status != "ACTIVE" }
+
+            if !activeCoverages.isEmpty {
+                // Prefer AppleCare+ for agreement number; use the latest end date
+                let appleCareEntry = activeCoverages.first(where: { ($0.attributes.description ?? "").contains("AppleCare") })
+                let latestCoverage = activeCoverages.max(by: {
+                    ($0.attributes.endDateTime ?? "") < ($1.attributes.endDateTime ?? "")
+                })
+
+                if let agreement = appleCareEntry?.attributes.agreementNumber, !agreement.isEmpty {
+                    appleCareId = agreement
+                }
+                if let best = latestCoverage, let endDate = best.attributes.endDateTime {
                     warrantyDate = String(endDate.prefix(10))
                 }
+            } else if !expiredCoverages.isEmpty {
+                // All coverage expired — leave fields empty (no valid date to send)
+                // But extract the actual expiry date for reference
+                let latestExpired = expiredCoverages.max(by: {
+                    ($0.attributes.endDateTime ?? "") < ($1.attributes.endDateTime ?? "")
+                })
+                if let endDate = latestExpired?.attributes.endDateTime {
+                    warrantyDate = String(endDate.prefix(10))
+                }
+                let expiredAppleCare = expiredCoverages.first(where: { ($0.attributes.description ?? "").contains("AppleCare") })
+                if let agreement = expiredAppleCare?.attributes.agreementNumber, !agreement.isEmpty {
+                    appleCareId = agreement
+                }
+            }
+
+            // If no warranty date found and we have a PO date, calculate PO date + 4 years
+            if warrantyDate.isEmpty, !poDate.isEmpty {
+                let df = DateFormatter()
+                df.dateFormat = "yyyy-MM-dd"
+                if let date = df.date(from: poDate),
+                   let fourYearsLater = Calendar.current.date(byAdding: .year, value: 4, to: date) {
+                    warrantyDate = df.string(from: fourYearsLater)
+                }
+            }
+
+            // Sanitize appleCareId — don't send non-ID values like "expired"
+            if appleCareId.lowercased() == "expired" {
+                appleCareId = ""
             }
 
             // Default vendor

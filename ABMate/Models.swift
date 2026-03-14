@@ -414,7 +414,7 @@ struct JamfDeviceMatch {
     let currentPurchasing: JamfPurchasing?
 }
 
-/// Lightweight device record for bulk comparison (no purchasing detail — just identity)
+/// Lightweight device record for bulk comparison
 struct JamfBulkDevice {
     let id: String
     let name: String
@@ -423,6 +423,8 @@ struct JamfBulkDevice {
     let deviceType: JamfDeviceType
     var currentPONumber: String?
     var currentVendor: String?
+    var currentWarrantyDate: String?
+    var currentAppleCareId: String?
 }
 
 /// Entry in the bulk sync log
@@ -484,5 +486,60 @@ struct SyncPayload {
             purchasingAccount: purchasingAccount.isEmpty ? nil : purchasingAccount,
             purchasingContact: purchasingContact.isEmpty ? nil : purchasingContact
         )
+    }
+}
+
+// MARK: - Activity History
+
+struct ActivityEntry: Identifiable, Codable {
+    let id: UUID
+    let timestamp: Date
+    let category: ActivityCategory
+    let title: String
+    let detail: String
+    let icon: String
+
+    init(category: ActivityCategory, title: String, detail: String = "", icon: String? = nil) {
+        self.id = UUID()
+        self.timestamp = Date()
+        self.category = category
+        self.title = title
+        self.detail = detail
+        self.icon = icon ?? category.defaultIcon
+    }
+
+    /// Restore from persisted data (preserves original id and timestamp)
+    init(id: UUID, timestamp: Date, category: ActivityCategory, title: String, detail: String = "", icon: String? = nil) {
+        self.id = id
+        self.timestamp = timestamp
+        self.category = category
+        self.title = title
+        self.detail = detail
+        self.icon = icon ?? category.defaultIcon
+    }
+
+    enum ActivityCategory: String, Codable, CaseIterable {
+        case connection = "Connection"
+        case sync = "Sync"
+        case assignment = "Assignment"
+        case export = "Export"
+
+        var defaultIcon: String {
+            switch self {
+            case .connection: return "link"
+            case .sync: return "arrow.triangle.2.circlepath"
+            case .assignment: return "arrow.right.circle"
+            case .export: return "square.and.arrow.up"
+            }
+        }
+
+        var color: String {
+            switch self {
+            case .connection: return "purple"
+            case .sync: return "orange"
+            case .assignment: return "blue"
+            case .export: return "green"
+            }
+        }
     }
 }

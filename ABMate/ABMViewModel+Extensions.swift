@@ -125,10 +125,12 @@ extension ABMViewModel {
             await MainActor.run {
                 statusMessage = "Successfully \(action) \(deviceCount) device\(deviceCount == 1 ? "" : "s"). Activity ID: \(activityId)"
                 lastActivityId = activityId
+                logActivity(.assignment, title: "Devices \(action.capitalized)", detail: "\(deviceCount) device\(deviceCount == 1 ? "" : "s") \(action). Activity ID: \(activityId)")
             }
         } catch {
             await MainActor.run {
                 errorMessage = "Assignment failed: \(error.localizedDescription)"
+                logActivity(.assignment, title: "Assignment Failed", detail: error.localizedDescription)
             }
         }
         

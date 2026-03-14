@@ -141,7 +141,8 @@ class APIService {
 
         // Debug logging
         let responseString = String(data: data, encoding: .utf8) ?? "No data"
-        print("AppleCare Raw Response: \(responseString)")
+        print("AppleCare Raw Response for \(deviceId): \(responseString)")
+        print("AppleCare URL: \(url.absoluteString)")
 
         if let httpResponse = response as? HTTPURLResponse {
             print("AppleCare Status Code: \(httpResponse.statusCode)")
